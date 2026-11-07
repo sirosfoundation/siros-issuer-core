@@ -1,0 +1,129 @@
+name: Conformance (OIDF issuer plan)
+
+# The OpenID Foundation suite against the issuer — the
+# oid4vci-1_0-issuer-test-plan, driven by the conformance repo's Playwright
+# spec (specs/conformance/oid4vci-issuer-core.spec.ts) over the suite's own
+# HTTP surface: both grants (pre-authorized + authorization_code), both
+# credential formats (sd_jwt_vc + mso_mdoc), the four suite variants, DPoP
+# sender-constraining, encrypted and plain credential responses.
+#
+# The stack (the conformance repo's compose): the issuer image built from
+# this PR, the Mode A dev portal + status stub + TLS terminator
+# (compose/siros-issuer-core.yml), go-trust in allow mode
+# (compose/go-trust.yml — local-test only, never prod), and the OIDF suite
+# itself (compose/conformance-suite.yml, tag pinned in
+# conformance/suite-version — never :latest, an invisible upstream bump
+# changes the verdict without a change here).
+#
+# PRs only (not pushes to main) — the suite run costs minutes the merge
+# queue does not need twice; the workflow_dispatch path covers main.
+# No module blacklist: the issuer spec runs the plan's full module set
+# (the one structural skip is the suite's own proof-module selection
+# split — both proof types are implemented and probed).
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "service/**"
+      - "conformance/suite-version"
+      - "Dockerfile"
+      - ".github/workflows/conformance.yml"
+  workflow_dispatch:
+    inputs:
+      conformance-ref:
+        description: "The conformance repo ref to run (default: main)"
+        required: false
+        default: "main"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: conformance-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  conformance:
+    name: OIDF conformance (oid4vci issuer)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # The suite's TLS host — the suite validates callbacks against this
+      # name (the conformance repo's documented prerequisite).
+      CONFORMANCE_URL: https://localhost.emobix.co.uk:8443/
+      # The OIDF suite's release, PINNED (never :latest) — read from
+      # conformance/suite-version (the checked-in single source; the step
+      # below exports it). Compose takes it as CONFORMANCE_SUITE_TAG for
+      # both suite images (server + nginx).
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Checkout the conformance repo (pinned ref)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: sirosfoundation/siros-conformance
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.conformance-ref || 'main' }}
+          path: conformance-repo
+
+      - name: The suite version (pinned, from conformance/suite-version)
+        run: |
+          TAG="$(grep -oE 'release-v[0-9.]+' conformance/suite-version | head -1)"
+          if [ -z "$TAG" ]; then
+            echo "::error::conformance/suite-version carries no release tag"
+            exit 1
+          fi
+          echo "CONFORMANCE_SUITE_TAG=$TAG" >> "$GITHUB_ENV"
+          echo "The OIDF conformance suite: $TAG"
+
+      - name: Build the issuer image (this PR)
+        run: docker build --network=host -t siros-issuer-core:local .
+
+      - name: The suite's TLS host
+        run: echo "127.0.0.1 localhost.emobix.co.uk" | sudo tee -a /etc/hosts
+
+      - name: Bring up the issuer conformance stack
+        working-directory: conformance-repo
+        run: |
+          npm ci
+          npx playwright install chromium --with-deps
+          CONFORMANCE_SUITE_TAG="$CONFORMANCE_SUITE_TAG" \
+            docker compose \
+              -f compose/siros-issuer-core.yml \
+              -f compose/go-trust.yml \
+              -f compose/conformance-suite.yml \
+              up -d --remove-orphans
+          # The suite's server takes its time on first boot (the Mongo
+          # seed, the Spring context); the nginx 302 is the readiness
+          # signal. The issuer has its own compose healthcheck (curl
+          # /healthz) the stack waits on.
+          for i in $(seq 1 60); do
+            if curl -sk -o /dev/null -w '%{http_code}' "${CONFORMANCE_URL%/}/" | grep -q 302; then
+              echo "The suite is up (attempt $i)"
+              break
+            fi
+            sleep 5
+          done
+          curl -sk -o /dev/null "${CONFORMANCE_URL%/}/" || true
+          # The runner's own prerequisite: the issuer on its
+          # host-published port.
+          curl -sf http://localhost:9016/healthz
+
+      - name: Run the issuer suite (oid4vci-1_0-issuer-test-plan)
+        working-directory: conformance-repo
+        run: |
+          NODE_TLS_REJECT_UNAUTHORIZED=0 npx playwright test specs/conformance/oid4vci-issuer-core.spec.ts
+
+      - name: The results, as artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-results
+          path: |
+            conformance-repo/conformance-results/
+            conformance-repo/test-results/
+            conformance-repo/playwright-report/
+          if-no-files-found: warn

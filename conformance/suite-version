@@ -1,0 +1,12 @@
+# The OIDF Conformance Suite release this repo's CI runs against.
+#
+# NEVER `latest`: a suite release is the reference the results are judged
+# against — an invisible upstream bump changes the verdict without a change
+# here. The value feeds the run's compose (CONFORMANCE_SUITE_TAG, both
+# suite images: server + nginx) in .github/workflows/conformance.yml.
+#
+# To adopt a new release: bump the tag below in one PR, with the suite's
+# release notes.
+#
+# Release notes: https://gitlab.com/openid/conformance-suite/-/releases
+conformance-suite-tag: release-v5.3.4
