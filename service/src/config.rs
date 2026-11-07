@@ -261,6 +261,19 @@ pub struct IssuanceCfg {
     /// the suite's batch module skips — permitted). Must be ≥ 2.
     #[serde(default)]
     pub batch_size: Option<u32>,
+    /// Deferred issuance (design §7.6, Final §9): when true, `/credential`
+    /// arms a `transaction_id` and answers pending (`{transaction_id,
+    /// interval}`) instead of issuing; the wallet polls
+    /// `/deferred-credential`. Advertises `deferred_credential_endpoint`.
+    #[serde(default)]
+    pub deferred: bool,
+    /// Final §9 `interval` guidance (seconds) in the pending response.
+    #[serde(default = "default_deferred_interval")]
+    pub deferred_interval_seconds: u64,
+}
+
+fn default_deferred_interval() -> u64 {
+    5
 }
 
 fn default_credential_validity() -> i64 {

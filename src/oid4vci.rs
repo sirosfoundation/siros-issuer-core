@@ -542,13 +542,27 @@ pub struct CredentialResponse {
     /// Final §8.3: `credentials` — an array of issued credentials, each
     /// `{"format": ..., "credential": ...}` (the draft-era singular
     /// `credential` member is gone; the suite requires the array).
+    /// Absent in the deferred-pending response: §8.3 MUST NOT be used
+    /// when `transaction_id` is present.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub credentials: Vec<CredentialEntry>,
+    /// Final §9: present (with `credentials` absent) when the issuer
+    /// defers — the wallet polls `deferred_credential_endpoint` with it.
+    /// MUST be invalidated once the credential has been obtained
+    /// (single-use, atomic — design §7.6).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transaction_id: Option<String>,
+    /// Final §9: poll-interval guidance (seconds) emitted with
+    /// `transaction_id` (design §7.6: vc's `interval` guidance).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interval: Option<u64>,
     /// Final §8.3: `notification_id` — the wallet echoes it to the
     /// notification endpoint on credential_accepted/…/credential_deleted.
     /// c_nonce/c_nonce_expires_in are NOT members of the credential
     /// response in 1.0 Final (the nonce endpoint is the source;
     /// VCIValidateNoUnknownKeysInCredentialResponse enforces the closed
     /// set {credentials, transaction_id, notification_id, interval}).
+    /// MUST NOT be present when `credentials` is absent (§8.3).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notification_id: Option<String>,
     /// The auxiliary-data extension (design §8.3 item 3, vc
@@ -573,6 +587,20 @@ pub struct CredentialMetadata {
 pub struct CredentialEntry {
     pub format: String,
     pub credential: String,
+}
+
+/// `POST /deferred-credential` body (Final §9 Deferred Credential Request):
+/// the `transaction_id` from the pending credential response, plus —
+/// optionally — response-encryption parameters for THIS response. §9.1 is
+/// explicit: the Deferred Credential Response is encrypted per the
+/// parameters in *this* request, "regardless of what was sent in the
+/// initial Credential Request" — they are read here and never inherited
+/// from the initial request.
+#[derive(Debug, Deserialize)]
+pub struct DeferredCredentialRequest {
+    pub transaction_id: String,
+    #[serde(default)]
+    pub credential_response_encryption: Option<CredentialResponseEncryption>,
 }
 
 // ─── Notification (ID1 §11.3) ─────────────────────────────────────────────

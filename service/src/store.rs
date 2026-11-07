@@ -78,6 +78,11 @@ pub struct SessionRecord {
     /// transaction; the value itself rides the credential response.
     /// Set when a session defers instead of issuing.
     pub transaction_id_hash: Option<String>,
+    /// Deferred issuance (§7.6): the proofs' verified holder JWKs, carried
+    /// by the arm — the deferred request carries only `transaction_id`
+    /// (Final §9), so the keys the initial request proved must survive
+    /// the deferral. Public key material only, never subject data.
+    pub pending_holder_jwks: Option<Vec<serde_json::Value>>,
     /// OID4VCI tx_code descriptor (input mode/length), safe to serve.
     pub tx_code_spec: Option<siros_issuer_core::oid4vci::TxCode>,
     /// Authorization-code grant only: the PAR binding and the minted
@@ -411,8 +416,14 @@ impl MemoryStore {
     }
 
     /// Deferred issuance (§7.6): arm a transaction on a `pending`
-    /// session. Single-arm.
-    pub fn set_transaction(&self, id: &SessionId, transaction_id_hash: String) -> Result<()> {
+    /// session — the verified holder JWKs ride the arm (the deferred
+    /// request carries only `transaction_id`). Single-arm.
+    pub fn set_transaction(
+        &self,
+        id: &SessionId,
+        transaction_id_hash: String,
+        holder_jwks: Vec<serde_json::Value>,
+    ) -> Result<()> {
         let mut inner = self.lock()?;
         let record = inner
             .records
@@ -429,18 +440,25 @@ impl MemoryStore {
             ));
         }
         record.transaction_id_hash = Some(transaction_id_hash.clone());
+        record.pending_holder_jwks = Some(holder_jwks);
         inner.by_transaction.insert(transaction_id_hash, id.clone());
         Ok(())
     }
 
     /// Deferred issuance: consume a pending transaction (single-use —
-    /// the arm is cleared under the lock; a second take misses).
+    /// the arm is cleared under the lock; a second take misses). The
+    /// returned snapshot retains the armed holder JWKs for the issuance
+    /// the caller is about to perform.
     pub fn take_transaction(&self, transaction_id_hash: &str) -> Option<SessionRecord> {
         let mut inner = self.lock().ok()?;
         let id = inner.by_transaction.remove(transaction_id_hash)?;
         let record = inner.records.get_mut(&id)?;
+        // Snapshot BEFORE clearing: the caller issues with the armed
+        // holder JWKs.
+        let snapshot = record.clone();
         record.transaction_id_hash = None;
-        Some(record.clone())
+        record.pending_holder_jwks = None;
+        Some(snapshot)
     }
 
     /// Read-only lookup by authorization code (no consumption): Mode B's
@@ -694,8 +712,15 @@ pub trait SessionStore: Send + Sync {
 
     /// Deferred issuance (§7.6): arm a transaction on a `pending`
     /// session — the wallet polls `/deferred-credential` with the
-    /// transaction id. Single-arm: a second arm refuses.
-    async fn set_transaction(&self, id: &SessionId, transaction_id_hash: String) -> Result<()>;
+    /// transaction id. The proofs' verified holder JWKs ride the arm (the
+    /// deferred request carries only `transaction_id`, Final §9).
+    /// Single-arm: a second arm refuses.
+    async fn set_transaction(
+        &self,
+        id: &SessionId,
+        transaction_id_hash: String,
+        holder_jwks: Vec<serde_json::Value>,
+    ) -> Result<()>;
 
     /// Deferred issuance: consume a pending transaction by its
     /// transaction-id hash. Returns the session record iff the
@@ -865,8 +890,13 @@ impl SessionStore for MemoryStore {
         MemoryStore::take_mode_b(self, challenge_handle)
     }
 
-    async fn set_transaction(&self, id: &SessionId, transaction_id_hash: String) -> Result<()> {
-        MemoryStore::set_transaction(self, id, transaction_id_hash)
+    async fn set_transaction(
+        &self,
+        id: &SessionId,
+        transaction_id_hash: String,
+        holder_jwks: Vec<serde_json::Value>,
+    ) -> Result<()> {
+        MemoryStore::set_transaction(self, id, transaction_id_hash, holder_jwks)
     }
 
     async fn take_transaction(&self, transaction_id_hash: &str) -> Option<SessionRecord> {

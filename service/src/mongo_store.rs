@@ -630,6 +630,69 @@ impl SessionStore for MongoStore {
         Some((record, sealed))
     }
 
+    /// Deferred issuance (§7.6): arm — a compare-and-set on the
+    /// transaction index (single-arm server-side: the filter demands the
+    /// index absent AND the session `pending`).
+    async fn set_transaction(
+        &self,
+        id: &SessionId,
+        transaction_id_hash: String,
+        holder_jwks: Vec<serde_json::Value>,
+    ) -> Result<()> {
+        let holder_jwks_doc =
+            bson::to_bson(&holder_jwks).map_err(|e| Error::invalid_input(format!("jwks: {e}")))?;
+        let result = self
+            .sessions
+            .update_one(
+                doc! {
+                    "_id": id.as_str(),
+                    "transaction_id_hash": { "$exists": false },
+                    "record.state": "pending",
+                },
+                doc! {
+                    "$set": {
+                        "record.transaction_id_hash": transaction_id_hash.clone(),
+                        "record.pending_holder_jwks": holder_jwks_doc,
+                        "transaction_id_hash": transaction_id_hash,
+                    }
+                },
+            )
+            .await
+            .map_err(mongo_error)?;
+        if result.modified_count == 0 {
+            return Err(Error::illegal_transition(
+                "a deferred transaction arms only on a pending, unarmed session",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Deferred issuance: consume — `find_one_and_update` unsets the
+    /// transaction arm and returns the BEFORE-picture (the armed
+    /// snapshot, holder JWKs intact) in one server-side step: the session
+    /// survives (it transitions `issued`), the arm does not (single-use,
+    /// atomic). A second take misses the index.
+    async fn take_transaction(&self, transaction_id_hash: &str) -> Option<SessionRecord> {
+        let before = self
+            .sessions
+            .find_one_and_update(
+                doc! { "transaction_id_hash": transaction_id_hash },
+                doc! {
+                    "$unset": {
+                        "transaction_id_hash": "",
+                        "record.transaction_id_hash": "",
+                        "record.pending_holder_jwks": "",
+                    }
+                },
+                mongodb::options::FindOneAndUpdateOptions::builder()
+                    .return_document(mongodb::options::ReturnDocument::Before)
+                    .build(),
+            )
+            .await
+            .ok()??;
+        record_of(&before).ok()
+    }
+
     /// The sweep (§6.3). Pass 3 (the hard delete) is MongoDB's own: the
     /// TTL index expires `retain_at` asynchronously (the transition
     /// updates keep it current). This pass does the expire + purge

@@ -591,38 +591,7 @@ async fn credential_inner(
         .session_by_access_token(&token_hash, now)
         .await
         .ok_or_else(|| err(Error::invalid_input("unknown or expired access token")))?;
-    // RFC 9449 §4: a DPoP-bound access token demands a fresh proof whose
-    // `ath` is this token's hash and whose key thumbprint matches the
-    // binding minted at /token.
-    if let Some(bound_jkt) = &dpop_jkt {
-        let proof = headers
-            .get("dpop")
-            .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| {
-                err(Error::invalid_input(
-                    "DPoP proof required for this access token",
-                ))
-            })?;
-        let access_token = headers
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .unwrap_or_default();
-        let ath = crate::dpop::access_token_hash(access_token);
-        let htu = state
-            .issuer_base
-            .join("credential")
-            .map_err(|e| err(Error::configuration(e.to_string())))?;
-        let verified = state
-            .dpop
-            .validate(proof, "POST", &htu, now, Some(&ath))
-            .map_err(err)?;
-        if &verified.jkt != bound_jkt {
-            return Err(err(Error::invalid_input(
-                "DPoP key does not match the access token binding",
-            )));
-        }
-    }
+    enforce_sender_constrained_token(&state, &headers, &dpop_jkt, "credential", now)?;
     let record = state.sessions.get(&session_id).await.ok_or_else(|| {
         credential_err(
             &state,
@@ -776,78 +745,76 @@ async fn credential_inner(
         }
     }
 
-    // Unseal the subject once: every entry in the batch is issued over
-    // the same session subject data (identical datasets — the suite
-    // compares them, ignoring digestID/random/validity/device key).
-    let sealed = record
-        .sealed
-        .clone()
-        .ok_or_else(|| err(Error::illegal_transition("session subject data was purged")))?;
-    let subject = state
-        .vault
-        .unseal(record.id.as_str(), &sealed)
-        .map_err(|e| credential_err(&state, &e))?;
-
-    // Format-aware issuance: mso_mdoc builds an IssuerSigned (COSE_Sign1
-    // over the MSO, per-element digests, RFC 9901-rounded validityInfo);
-    // dc+sd-jwt builds the SD-JWT. One entry per holder key; a distinct
-    // unpredictable status index per entry (the suite's
-    // VCIEnsureBatchStatusListIndicesAreUnpredictable). Batch entries
-    // (more than one key) round their time claims to a 3600 bucket —
-    // VCIEnsureBatchTimeClaimsNotLinkable treats time values shared
-    // across a batch as correlatable unless hour-aligned; a single
-    // issuance keeps the 300 bucket
-    // (VCIEnsureCredentialTimeClaimsNotLinkable).
-    let time_bucket_secs: i64 = if holder_jwks.len() > 1 { 3600 } else { 300 };
-    let mut entries = Vec::with_capacity(holder_jwks.len());
-    let mut metadata = None;
-    for holder_jwk in holder_jwks {
-        if is_mdoc {
-            let (mdoc_entries, mdoc_metadata) = issue_mdoc_entries(
-                &state,
-                record.clone(),
-                subject.clone(),
-                holder_jwk,
-                now,
-                time_bucket_secs,
+    // Deferred issuance (design §7.6, Final §9): armed here, issued at
+    // poll. The arm carries the verified holder keys (the deferred
+    // request carries only `transaction_id`); the session defers into
+    // `pending` and the wallet polls `/deferred-credential` until this
+    // issuer completes the issuance exactly once.
+    if state.endpoint_paths.deferred_credential.is_some() {
+        state
+            .step(&record.id, SessionEvent::Deferred)
+            .await
+            .map_err(|e| credential_err(&state, &e))?;
+        let transaction_id = fresh_transaction_id()?;
+        state
+            .sessions
+            .set_transaction(
+                &record.id,
+                hex_of(&transaction_id),
+                holder_jwks
+                    .iter()
+                    .map(|jwk| serde_json::to_value(jwk))
+                    .collect::<Result<_, _>>()
+                    .map_err(|e| err(Error::invalid_input(format!("holder jwk: {e}"))))?,
             )
-            .await?;
-            entries.extend(mdoc_entries);
-            metadata = metadata.or(mdoc_metadata);
-        } else {
-            let status_ref = state
-                .allocator
-                .allocate(None)
-                .await
-                .map_err(|e| credential_err(&state, &e))?;
-            entries.push(
-                issue_sdjwt_entry(
-                    &state,
-                    record.clone(),
-                    &subject,
-                    holder_jwk,
-                    status_ref,
-                    now,
-                    time_bucket_secs,
-                )
-                .await?,
-            );
-        }
+            .await
+            .map_err(|e| credential_err(&state, &e))?;
+        let response = CredentialResponse {
+            credentials: Vec::new(),
+            transaction_id: Some(transaction_id),
+            // Final §9: the poll-interval guidance (vc's `interval`).
+            interval: Some(state.deferred_interval_seconds),
+            // §8.3: notification_id MUST NOT be present without
+            // credentials.
+            notification_id: None,
+            credential_metadata: None,
+        };
+        return credential_response(&state, &headers, &response, None);
     }
+
+    let (entries, metadata) =
+        issue_session_entries(&state, &record, &holder_jwks, now).await?;
 
     let response = CredentialResponse {
         credentials: entries,
+        transaction_id: None,
+        interval: None,
         notification_id: Some(record.notification_id.clone()),
         credential_metadata: metadata,
     };
+    credential_response(&state, &headers, &response, request.credential_response_encryption.as_ref())
+}
+
+/// Build the credential response (shared by `/credential` and
+/// `/deferred-credential`, Final §8.3/§9): ECDHE-ES encryption when
+/// requested (and only the advertised suites) — for the deferred
+/// completion, the parameters are the DEFERRED request's (§9.1:
+/// "regardless of what was sent in the initial Credential Request").
+#[allow(clippy::result_large_err)]
+fn credential_response(
+    state: &AppState,
+    headers: &HeaderMap,
+    response: &CredentialResponse,
+    encryption: Option<&CredentialResponseEncryption>,
+) -> HandlerResult<Response> {
     let body =
-        serde_json::to_vec(&response).map_err(|e| err(Error::invalid_input(e.to_string())))?;
+        serde_json::to_vec(response).map_err(|e| err(Error::invalid_input(e.to_string())))?;
 
     // ECDHE-ES encryption when requested (and only the advertised suites).
-    if let Some(encryption) = &request.credential_response_encryption {
+    if let Some(encryption) = encryption {
         if encryption.alg != "ECDH-ES" || encryption.enc != "A128GCM" {
             return Err(credential_err(
-                &state,
+                state,
                 &Error::invalid_input("only alg ECDH-ES enc A128GCM are supported (as advertised)"),
             ));
         }
@@ -860,31 +827,104 @@ async fn credential_inner(
             kid,
             jose_rs::algorithm::JweEncryption::A128GCM,
         )
-        .map_err(|e| credential_err(&state, &e))?;
+        .map_err(|e| credential_err(state, &e))?;
         // Vec<(HeaderName, String)>: axum has no IntoResponse for a
         // variable-length header list + body — build the response
         // manually.
-        let mut response = Response::builder()
+        let mut built = Response::builder()
             .status(StatusCode::OK)
             .body(axum::body::Body::from(jwe))
             .expect("static response parts");
-        for (name, value) in fapi_headers(&headers, "application/jwt") {
-            response
+        for (name, value) in fapi_headers(headers, "application/jwt") {
+            built
                 .headers_mut()
                 .insert(name, value.parse().expect("header value"));
         }
-        return Ok(response);
+        return Ok(built);
     }
-    let mut response = Response::builder()
+    let mut built = Response::builder()
         .status(StatusCode::OK)
         .body(axum::body::Body::from(body))
         .expect("static response parts");
-    for (name, value) in fapi_headers(&headers, "application/json") {
-        response
+    for (name, value) in fapi_headers(headers, "application/json") {
+        built
             .headers_mut()
             .insert(name, value.parse().expect("header value"));
     }
-    Ok(response)
+    Ok(built)
+}
+
+/// Unseal the subject and issue one entry per verified holder key (shared
+/// by the immediate and the deferred issuance paths — one issuance
+/// routine, two entry points, design §7.6).
+///
+/// Format-aware: mso_mdoc builds an IssuerSigned (COSE_Sign1 over the
+/// MSO, per-element digests, RFC 9901-rounded validityInfo); dc+sd-jwt
+/// builds the SD-JWT. One entry per holder key; a distinct unpredictable
+/// status index per entry (the suite's
+/// VCIEnsureBatchStatusListIndicesAreUnpredictable). Batch entries
+/// (more than one key) round their time claims to a 3600 bucket —
+/// VCIEnsureBatchTimeClaimsNotLinkable treats time values shared across
+/// a batch as correlatable unless hour-aligned; a single issuance keeps
+/// the 300 bucket (VCIEnsureCredentialTimeClaimsNotLinkable).
+#[allow(clippy::result_large_err)]
+async fn issue_session_entries(
+    state: &AppState,
+    record: &crate::store::SessionRecord,
+    holder_jwks: &[jose_rs::jwk::Jwk],
+    now: i64,
+) -> HandlerResult<(Vec<CredentialEntry>, Option<CredentialMetadata>)> {
+    let is_mdoc =
+        catalog_format(state, &record.credential_configuration_id).as_deref() == Some("mso_mdoc");
+    // Unseal the subject once: every entry in the batch is issued over
+    // the same session subject data (identical datasets — the suite
+    // compares them, ignoring digestID/random/validity/device key).
+    let sealed = record
+        .sealed
+        .clone()
+        .ok_or_else(|| err(Error::illegal_transition("session subject data was purged")))?;
+    let subject = state
+        .vault
+        .unseal(record.id.as_str(), &sealed)
+        .map_err(|e| credential_err(state, &e))?;
+
+    let time_bucket_secs: i64 = if holder_jwks.len() > 1 { 3600 } else { 300 };
+    let mut entries = Vec::with_capacity(holder_jwks.len());
+    let mut metadata = None;
+    for holder_jwk in holder_jwks {
+        if is_mdoc {
+            let (mdoc_entries, mdoc_metadata) = issue_mdoc_entries(
+                state,
+                record.clone(),
+                subject.clone(),
+                holder_jwk.clone(),
+                now,
+                time_bucket_secs,
+            )
+            .await?;
+            entries.extend(mdoc_entries);
+            metadata = metadata.or(mdoc_metadata);
+        } else {
+            let status_ref = state
+                .allocator
+                .allocate(None)
+                .await
+                .map_err(|e| credential_err(state, &e))?;
+            entries.push(
+                issue_sdjwt_entry(
+                    state,
+                    record.clone(),
+                    &subject,
+                    holder_jwk.clone(),
+                    status_ref,
+                    now,
+                    time_bucket_secs,
+                )
+                .await?,
+            );
+        }
+    }
+    Ok((entries, metadata))
 }
 
 /// `POST /notification` (ID1 §11.3): wallet feedback into the state

@@ -142,6 +142,10 @@ async fn run(config_path: &str) -> siros_issuer_core::Result<()> {
     };
     let endpoint_paths = siros_issuer_core::oid4vci::EndpointPaths {
         request_encryption_jwk,
+        // Deferred issuance (§7.6, Final §9): advertised when configured;
+        // the credential endpoint then answers pending and
+        // `/deferred-credential` completes the issuance.
+        deferred_credential: config.issuance.deferred.then_some("deferred-credential"),
         // Batch issuance (Final §12.2.2): advertised when configured; the
         // configured size is the advertised batch_size (validated ≥ 2 at
         // startup below).
