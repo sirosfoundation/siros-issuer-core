@@ -1,0 +1,17 @@
+# Fixture-catalog service configuration (development, no network).
+# Used by `make run` and the service integration tests' shape reference.
+
+[issuer]
+url = "http://127.0.0.1:8080"
+
+[service]
+bind = "127.0.0.1:8080"
+
+[session]
+default_ttl_seconds = 300
+max_ttl_seconds = 3600
+retention_after_final_seconds = 86400
+
+[catalog]
+static_dir = "testdata/ts11"
+refresh_seconds = 0

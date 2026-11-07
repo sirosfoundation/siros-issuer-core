@@ -1,0 +1,55 @@
+{
+  "data": [
+    {
+      "id": "urn:eudi:pid:1",
+      "version": "1.0",
+      "rulebookURI": "https://registry.siros.org/rulebooks/eudi-pid",
+      "attestationLoS": "iso_18045_high",
+      "bindingType": "key",
+      "supportedFormats": [
+        "dc+sd-jwt"
+      ],
+      "schemaURIs": [
+        {
+          "formatIdentifier": "dc+sd-jwt",
+          "uri": "http://127.0.0.1:9/schemas/pid/vctm.json"
+        }
+      ]
+    },
+    {
+      "id": "eu.europa.ec.eudi.pid.1",
+      "version": "1.0",
+      "rulebookURI": "https://registry.siros.org/rulebooks/eudi-pid",
+      "attestationLoS": "iso_18045_high",
+      "bindingType": "key",
+      "supportedFormats": [
+        "mso_mdoc"
+      ],
+      "schemaURIs": [
+        {
+          "formatIdentifier": "mso_mdoc",
+          "uri": "http://127.0.0.1:9/schemas/pid/mddl.json"
+        }
+      ]
+    },
+    {
+      "id": "eu.europa.ec.eudi.nym_auth.1",
+      "version": "1.0",
+      "rulebookURI": "https://registry.siros.org/rulebooks/nym-auth",
+      "attestationLoS": "iso_18045_high",
+      "bindingType": "key",
+      "supportedFormats": [
+        "mso_mdoc"
+      ],
+      "schemaURIs": [
+        {
+          "formatIdentifier": "mso_mdoc",
+          "uri": "http://127.0.0.1:9/schemas/nym_auth/mddl.json"
+        }
+      ]
+    }
+  ],
+  "total": 3,
+  "limit": 3,
+  "offset": 0
+}

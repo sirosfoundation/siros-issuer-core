@@ -1,0 +1,80 @@
+[package]
+name = "siros-issuer-service"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Deployable HTTP service for siros-issuer-core"
+publish = false
+
+[[bin]]
+name = "siros-issuer-service"
+path = "src/main.rs"
+
+[features]
+# The MongoDB SessionStore backend (design §6.4). Production builds:
+# `--features mongo`. Default (dev, tests, the conformance image): the
+# in-memory store.
+mongo = ["dep:mongodb"]
+
+[dependencies]
+siros-issuer-core = { path = ".." }
+# TS11 parsing, byte caps and URL policy come from the verifier core; the
+# service adds transport around them.
+siros-verifier-core = { git = "https://github.com/sirosfoundation/siros-verifier-core", rev = "fa7f491beeae1d25f7291fee526462d343dcde5c" }
+jose-rs = { version = "0.10", default-features = false }
+aes-gcm = "0.11"
+getrandom = "0.4"
+sha2 = { version = "0.11", default-features = false }
+async-trait = "0.1"
+async-stream = "0.3"
+futures-util = "0.3"
+# HTTP/1.1 only: TLS is terminated upstream (verifier-core service convention).
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "net", "signal", "sync"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "form", "query"] }
+form_urlencoded = "1"
+# The production SessionStore backend (design §6.4); feature-gated so
+# dev/test builds without a Mongo deployment stay slim.
+# rustls TLS (no openssl); sync-less async API.
+# The production SessionStore backend (design §6.4) — OPTIONAL, behind
+# the `mongo` feature: bson (the driver's codec) enables
+# serde_json/preserve_order workspace-wide via feature unification,
+# which would change every JSON serialization; default builds (the
+# conformance image, dev) keep the memory store and plain serde_json.
+# Verifier-core's pin: 3.9.1 + compat-3-0-0 (forward-compat feature
+# required by the driver), rustls TLS.
+mongodb = { version = "3.9.1", default-features = false, features = [
+    "compat-3-0-0",
+    "rustls-tls",
+], optional = true }
+# rustcrypto software backend + pkcs11 (cryptoki) for the HSM signer provider.
+kryptering = { version = "0.7", default-features = false, features = ["rustcrypto", "pkcs11"] }
+# Direct cryptoki access (the kryptering re-exports do not cover
+# attribute reads needed for the public-JWK export).
+cryptoki = { version = "0.12", default-features = false }
+x509-cert = "0.2"
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+toml = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+url = { version = "2", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+base64 = "0.22"
+ciborium = "0.2"
+rcgen = "0.14"
+rustls-pki-types = "1"
+tempfile = "3"
+
+# testutil (wallet-side test tooling — wallet emulation, present/KB-JWT
+# construction) is a dev-only feature activation of the pinned
+# verifier-core; never a production dependency surface.
+[dev-dependencies.siros-verifier-core]
+git = "https://github.com/sirosfoundation/siros-verifier-core"
+rev = "fa7f491beeae1d25f7291fee526462d343dcde5c"
+features = ["testutil"]

@@ -1,0 +1,189 @@
+[
+  {
+    "format": "dc+sd-jwt",
+    "uri": "http://127.0.0.1:9/schemas/pid/vctm.json",
+    "body": {
+      "vct": "urn:eudi:pid:1",
+      "display": [
+        {
+          "name": "Person Identification Data (PID)",
+          "locale": "en"
+        }
+      ],
+      "claims": [
+        {
+          "path": [
+            "given_name"
+          ],
+          "mandatory": true,
+          "display": [
+            {
+              "name": "Given name",
+              "locale": "en"
+            }
+          ]
+        },
+        {
+          "path": [
+            "family_name"
+          ],
+          "mandatory": true,
+          "display": [
+            {
+              "name": "Family name",
+              "locale": "en"
+            }
+          ]
+        },
+        {
+          "path": [
+            "birth_date"
+          ],
+          "mandatory": false
+        }
+      ]
+    }
+  },
+  {
+    "format": "mso_mdoc",
+    "uri": "http://127.0.0.1:9/schemas/pid/mddl.json",
+    "body": {
+      "doctype": "eu.europa.ec.eudi.pid.1",
+      "display": [
+        {
+          "name": "PID (mdoc)",
+          "locale": "en"
+        }
+      ],
+      "claims": {
+        "eu.europa.ec.eudi.pid.1": {
+          "given_name": {
+            "mandatory": true,
+            "display": [
+              {
+                "name": "Given name",
+                "locale": "en"
+              }
+            ]
+          },
+          "family_name": {
+            "mandatory": true,
+            "display": [
+              {
+                "name": "Family name",
+                "locale": "en"
+              }
+            ]
+          },
+          "birth_date": {
+            "mandatory": true,
+            "display": [
+              {
+                "name": "Date of birth",
+                "locale": "en"
+              }
+            ]
+          },
+          "place_of_birth": {
+            "mandatory": true,
+            "display": [
+              {
+                "name": "Place of birth",
+                "locale": "en"
+              }
+            ]
+          },
+          "nationality": {
+            "mandatory": true,
+            "display": [
+              {
+                "name": "Nationality",
+                "locale": "en"
+              }
+            ]
+          },
+          "issuing_authority": {
+            "mandatory": true,
+            "display": [
+              {
+                "name": "Issuing authority",
+                "locale": "en"
+              }
+            ]
+          },
+          "issuing_country": {
+            "mandatory": true,
+            "display": [
+              {
+                "name": "Issuing country",
+                "locale": "en"
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "format": "mso_mdoc",
+    "uri": "http://127.0.0.1:9/schemas/nym_auth/mddl.json",
+    "body": {
+      "doctype": "eu.europa.ec.eudi.nym_auth.1",
+      "display": [
+        {
+          "name": "nym_auth (mdoc)",
+          "locale": "en"
+        }
+      ],
+      "claims": {
+        "eu.europa.ec.eudi.nym_auth.1": {
+          "birth_date": {
+            "mandatory": true,
+            "display": [
+              {
+                "name": "Date of birth",
+                "locale": "en"
+              }
+            ]
+          },
+          "birthplace_country": {
+            "mandatory": true,
+            "display": [
+              {
+                "name": "Country of birth",
+                "locale": "en"
+              }
+            ]
+          },
+          "issuing_country": {
+            "mandatory": true,
+            "display": [
+              {
+                "name": "Issuing country",
+                "locale": "en"
+              }
+            ]
+          },
+          "personal_administrative_number": {
+            "mandatory": true,
+            "display": [
+              {
+                "name": "Personal administrative number",
+                "locale": "en"
+              }
+            ]
+          },
+          "ssc": {
+            "mandatory": false,
+            "display": [
+              {
+                "name": "SSC commitment",
+                "locale": "en"
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+]

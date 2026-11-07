@@ -1,0 +1,32 @@
+{
+  "circuits": [
+    {
+      "id": "zk-cred-vega-v1-nym-auth",
+      "aliases": ["nym-auth-vega-v1"],
+      "system": "vega-mc",
+      "systemVersion": "1.0",
+      "docTypes": ["eu.europa.ec.eudi.nym_auth.1"],
+      "published": true,
+      "status": "active",
+      "params": {
+        "saltBytes": "32",
+        "numClaims": "4",
+        "maxClaimBytes": "176"
+      },
+      "notes": "zk-cred-vega R1CS for nym_auth; DIGEST_ID_OFFSET_BYTES baked at setup() — every IssuerSignedItem salt must be 32 bytes."
+    },
+    {
+      "id": "zk-cred-longfellow-v1-generic",
+      "aliases": ["longfellow-v1"],
+      "system": "longfellow",
+      "systemVersion": "1.0",
+      "docTypes": ["eu.europa.ec.eudi.nym_auth.1"],
+      "published": true,
+      "status": "active",
+      "params": {
+        "numAttributes": 2
+      },
+      "notes": "zk-cred-longfellow for nym_auth; publishes no saltBytes (default per-element sizing serves it)."
+    }
+  ]
+}

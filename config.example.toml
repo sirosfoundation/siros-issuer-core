@@ -1,0 +1,132 @@
+# siros-issuer-service configuration (design §4.3).
+#
+# Exactly one of catalog.static_dir (fixtures / air-gapped dev) or
+# catalog.mirrors (live TS11 registry) is valid.
+
+[issuer]
+# HTTPS in production; HTTP on loopback is accepted for development.
+url = "https://issuer.example.org"
+# Optional: separate Authorization Server(s). Omitted means the issuer is
+# its own AS (v1 default).
+# authorization_servers = ["https://auth.example.org"]
+
+[service]
+bind = "127.0.0.1:8080"
+
+[session]
+default_ttl_seconds = 300
+max_ttl_seconds = 3600
+retention_after_final_seconds = 86400
+
+# ── Signing key (P1: required for issuance) ─────────────────────────────
+# JWK JSON. Absent: an ephemeral dev key is generated per process
+# (development only — restarts rotate the key).
+[signing]
+# jwk_path = "issuer-sdjwt.jwk"
+
+[issuance]
+credential_validity_seconds = 3600
+access_token_ttl_seconds = 300
+c_nonce_ttl_seconds = 300
+
+# ── Development: fixture catalog, no network ─────────────────────────────
+[catalog]
+static_dir = "testdata/ts11"
+refresh_seconds = 0
+
+# ── Production: live TS11 registry ───────────────────────────────────────
+# [catalog]
+# mirrors = ["https://registry.siros.org/schemas"]
+# refresh_seconds = 300
+
+# ── siros-status-service (P1+: allocation & revocation, design §9) ──────
+# [status_service]
+# as_url = "https://auth.t.status.siros.org"
+# ingestion_url = "https://api.t.status.siros.org"
+
+# ── go-trust PDP (P1+: AuthZEN, fail-closed, design §11) ────────────────
+# [pdp]
+# url = "https://trust.example.org"
+
+# ── ZK layer (design §8.3) ────────────────────────────────────────────────
+# The circuit catalog (item 1): the source of truth for zk issuance
+# parameters, resolved per (system, doctype). Fail-closed — a pin stands
+# in only for a catalog that cannot answer, never overrides a live
+# refusal.
+[zk.circuits]
+static_dir = "testdata/zkcircuits"
+
+# Rulebooks (item 5): the bundle that makes a credential ZK-provable.
+# General data — a new rulebook is a table here plus catalog entries; no
+# code changes unless it needs a new derivation primitive. nym_auth is
+# rulebook #1.
+[zk.rulebooks.nym_auth]
+credentials = ["eu.europa.ec.eudi.nym_auth.1"]
+zk_systems = ["vega-mc"]
+# Optional pin (air-gapped / not-yet-published interop): stands in when
+# the catalog cannot answer, wins-but-logs against a disagreeing live
+# answer, never overrides a refusal.
+# pinned_salt_bytes = 32
+
+# The auxiliary-data plan (item 3): each to_wallet entry derives an
+# opening, commits it (hash_commitment), writes the commitment into the
+# document at `path`, and returns the opening in the credential response.
+[[zk.rulebooks.nym_auth.auxiliary_data.to_wallet]]
+alg = "sha-256"
+path = ["eu.europa.ec.eudi.nym_auth.1", "ssc"]
+encoding = "base64url"
+
+# The derivation (item 4): HKDF over the named subject claims, from a
+# seed. LOCAL TEST ONLY: the secret is in-line; production rulebooks use
+# the SeedProvider (secret-manager refs), never config-carried secrets.
+[zk.rulebooks.nym_auth.auxiliary_data.to_wallet.opening]
+hkdf = { secret_b64url = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", inputs = [
+    "issuing_country",
+    "personal_administrative_number",
+], bytes = 16 }
+
+# ── HSM signing (design §11.1) ───────────────────────────────────────────
+# The PKCS#11 provider: the token's key signs every issuer signature
+# (SD-JWT + mdoc credentials, status-service assertion, signed metadata)
+# through the same signer::Signer boundary as the file key. Mutually
+# exclusive with signing.jwk_path — an HSM deployment never silently
+# falls back to a file key. SoftHSM shown; vendor modules for real HSMs.
+#
+# [signing.pkcs11]
+# module_path = "/usr/lib/softhsm/libsofthsm2.so"
+# # slot_id absent = the first slot with a token present
+# # slot_id = 0
+# pin is injected via the secret manager / environment in production —
+# never the config file; a local-test token may carry it:
+# # pin = "issuer-test-pin-4321"
+# key_label = "issuer-signing"
+# kid = "issuer-signing-1"
+
+[session]
+default_ttl_seconds = 300
+max_ttl_seconds = 3600
+retention_after_final_seconds = 86400
+# The retention sweeper's period (§6.3); 0 disables the loop (expiry then
+# happens lazily at access).
+sweep_interval_seconds = 60
+
+# ── Storage backend (design §6.4) ─────────────────────────────────────────
+# Default: the in-memory store (tests, single-process dev — restart
+# clears it). Production: MongoDB behind the same SessionStore contract
+# (atomic single-use claims across replicas, TTL-indexed retention) —
+# build with `--features mongo` and configure:
+#
+# [storage.mongodb]
+# uri = "mongodb://mongo.internal:27017"
+# # One tenant per database, purely from config:
+# database = "issuer_prod"
+# collection = "sessions"
+
+# ── Wallet-surface rate limiting (design §11) ─────────────────────────────
+# vc's defaults; per-endpoint per-client, 1-minute windows, fail-closed
+# (a limiter failure is 503, never an open window).
+[rate_limit]
+offer_per_minute = 20        # GET credential-offer
+credential_per_minute = 30  # POST credential + batch-credential
+token_per_minute = 20       # POST token (both grants)
+challenge_per_minute = 20   # POST authorization-challenge (+ Mode B response)

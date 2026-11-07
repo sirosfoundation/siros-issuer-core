@@ -1,0 +1,42 @@
+[workspace]
+resolver = "2"
+members = [".", "service"]
+
+[workspace.package]
+edition = "2021"
+license = "BSD-2-Clause"
+repository = "https://github.com/sirosfoundation/siros-issuer-core"
+authors = ["SIROS Foundation"]
+
+[package]
+name = "siros-issuer-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Sans-I/O digital credential issuance core"
+publish = false
+
+[dependencies]
+# Verification, TS 119 602/TS11 schema parsing and status-list formats come
+# from the verifier core; issuance never re-implements them.
+siros-verifier-core = { git = "https://github.com/sirosfoundation/siros-verifier-core", rev = "fa7f491beeae1d25f7291fee526462d343dcde5c" }
+# Same JOSE stack as the verifier (its testutil issuance primitives, ported
+# into src/sdjwt_issue.rs and src/response.rs, use these).
+jose-rs = { version = "0.10", default-features = false }
+aes-gcm = "0.11"
+getrandom = "0.4"
+base64 = "0.22"
+sha2 = { version = "0.11", default-features = false }
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+hkdf = "0.13"
+ciborium = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+url = { version = "2", features = ["serde"] }
+
+[dev-dependencies]
+rcgen = "0.14"
+rustls-pki-types = "1"

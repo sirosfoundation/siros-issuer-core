@@ -1,0 +1,100 @@
+# siros-issuer-core conformance configuration (local-test only).
+#
+# allow_insecure_url: the conformance compose network is plain HTTP and
+# TLS is terminated nowhere — this flag exists for exactly that, mirroring
+# verifier-core's allow_invalid_status_list_certificates escape hatch.
+# Never set it outside a test deployment.
+#
+# PDP + status service point at real services: go-trust (allow-all mode,
+# same profile) and the deployed test siros-status-service.
+
+[issuer]
+# The TLS proxy's hostname (nginx terminates TLS; the suite's Java
+# truststore contains the conformance CA that signed issuer-tls.crt).
+url = "https://issuer.conformance.example.com:9443"
+# Local-test-only: go-trust-allow and the dev portal are plain HTTP on the
+# compose network (mirrors verifier-core's fixture escape hatch).
+allow_insecure_url = true
+
+[authorization]
+# Mode A login handoff (design §7.2): the conformance dev portal. The
+# suite's browser (playwright) runs on the host, so the portal's
+# published port — plain HTTP, local-test only.
+login_url = "http://localhost:9017/login"
+
+# Pre-registered clients (design §12.2, resolved): the suite's wallet,
+# whose private_key_jwt key pair is configs/conformance/vci-issuer-core-config.json.
+[authorization.clients.e2e-test-client]
+# The suite generates its own callback URIs per module.
+allow_any_redirect_uri = true
+# §5.1.2: the suite's wallet requests pid by scope.
+scope = "pid"
+
+[authorization.clients.e2e-test-client-2]
+allow_any_redirect_uri = true
+scope = "pid"
+
+[[authorization.clients.e2e-test-client-2.jwks]]
+kty = "EC"
+x = "_MUU-7kbV7WJXhrXJuDaAhHKqvDBHq-a4NH1ekAqo8I"
+y = "7JpnjHEJoyGLdjw_HkNBI9KU7CsswTrDTb7RSmLZ5m0"
+crv = "P-256"
+kid = "client-key-2"
+use = "sig"
+alg = "ES256"
+
+# §5.1.2 scope → credential_configuration_id.
+[authorization.scopes]
+pid = "urn:eudi:pid:1"
+
+[[authorization.clients.e2e-test-client.jwks]]
+kty = "EC"
+x = "ktT77AqMntawPyU772lBg8nd7cwENrYyOL_KWbYN8Jc"
+y = "67lPXEq5gJdimDYD0AacxLfRfIm2-fSNd3HBqyXXvBI"
+crv = "P-256"
+kid = "client-key-1"
+use = "sig"
+alg = "ES256"
+
+[signing]
+jwk_path = "/etc/siros-issuer/signing.jwk"
+# Final §12.2.4 request encryption: publish the same local-test key the
+# wallet encrypts its requests to (the metadata suite warns when
+# credential_response_encryption is declared without it).
+request_encryption_jwk_path = "/etc/siros-issuer/request-encryption.jwk"
+
+[issuance]
+credential_validity_seconds = 3600
+access_token_ttl_seconds = 300
+c_nonce_ttl_seconds = 300
+
+[service]
+bind = "0.0.0.0:8080"
+
+[catalog]
+static_dir = "/etc/siros-issuer/ts11"
+refresh_seconds = 0
+
+[pdp]
+url = "http://go-trust-allow:6001/evaluation"
+
+# LOCAL-TEST-ONLY status-list stub (fixtures/siros-issuer-core/
+# status-stub.mjs): stood in while the deployed test service has the
+# StatusListToken embedded-jwk kid issue (sirosfoundation/
+# siros-status-service#20). Point back at the deployed service when
+# that is fixed:
+#   as_url = "https://auth.t.status.siros.org"
+#   ingestion_url = "https://api.t.status.siros.org"
+# The issuer reaches the stub DIRECTLY over plain HTTP on the compose
+# network (its reqwest/rustls client does not carry the conformance CA;
+# allow_insecure_url above permits this). The stub's STATUS_BASE_URL still
+# advertises the HTTPS nginx URL so the suite's Java truststore can fetch
+# the StatusListToken.
+[status_service]
+as_url = "http://siros-issuer-core-status:8080"
+ingestion_url = "http://siros-issuer-core-status:8080"
+
+[session]
+default_ttl_seconds = 300
+max_ttl_seconds = 3600
+retention_after_final_seconds = 86400

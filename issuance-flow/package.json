@@ -1,0 +1,39 @@
+{
+  "name": "@sirosfoundation/issuance-flow",
+  "version": "0.1.0",
+  "description": "Framework-free OpenID4VCI issuance UX — QR, deep link, and Digital Credentials API handover, driven by opaque handles only (no PII)",
+  "keywords": [
+    "openid4vci",
+    "digital-credentials",
+    "dc-api",
+    "wallet",
+    "issuer"
+  ],
+  "type": "module",
+  "main": "issuance-flow.js",
+  "exports": "./issuance-flow.js",
+  "files": [
+    "issuance-flow.js",
+    "demo.js"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "test": "node --test issuance-flow.test.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sirosfoundation/siros-issuer-core.git",
+    "directory": "issuance-flow"
+  },
+  "homepage": "https://github.com/sirosfoundation/siros-issuer-core/tree/main/issuance-flow#readme",
+  "bugs": {
+    "url": "https://github.com/sirosfoundation/siros-issuer-core/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "BSD-2-Clause"
+}

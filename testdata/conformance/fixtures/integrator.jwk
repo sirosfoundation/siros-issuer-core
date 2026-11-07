@@ -1,0 +1,10 @@
+{
+  "kty": "EC",
+  "x": "HEN7Az8wJJorUeRLEaQRd-Cb5oruUdJqFDoi1bIixgU",
+  "y": "V5FLv1H5fv7-Td4zPmbz-InhLHkJ5tkjZsAl1UWx-2g",
+  "crv": "P-256",
+  "d": "6XIAclgImZfR1qmSWCoVfqYaPrF6KaIrg7gUm2u81VU",
+  "kid": "portal-integrator-1",
+  "alg": "ES256",
+  "use": "sig"
+}
