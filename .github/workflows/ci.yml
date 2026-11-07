@@ -23,3 +23,60 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --locked --workspace
+
+  mongo:
+    # The production SessionStore backend, against a real mongod (the
+    # default build runs the memory-store suites).
+    runs-on: ubuntu-latest
+    services:
+      mongodb:
+        image: mongo:6
+        ports:
+          - 127.0.0.1:27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ping:1})'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Mongo store tests
+        run: cargo test --locked -p siros-issuer-service --features mongo --test mongo_store
+
+  hsm:
+    # The PKCS#11 signer provider, against a real SoftHSM token (the
+    # provisioning runs in-step; the suite skips without softhsm2-util).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install SoftHSM
+        run: sudo apt-get update && sudo apt-get install -y softhsm2
+      - name: PKCS#11 tests
+        run: >
+          sudo -E env "PATH=$PATH" cargo test --locked -p siros-issuer-service
+          --test pkcs11_signer --test issuance_e2e hsm_
+
+  issuance-flow:
+    # The npm UX module (§10): node tests.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: issuance-flow
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Test
+        run: node --test issuance-flow.test.mjs
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the service image
+        run: docker build -t siros-issuer-core:ci .
