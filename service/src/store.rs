@@ -447,10 +447,23 @@ impl MemoryStore {
 
     /// Deferred issuance: consume a pending transaction (single-use —
     /// the arm is cleared under the lock; a second take misses). The
-    /// returned snapshot retains the armed holder JWKs for the issuance
-    /// the caller is about to perform.
-    pub fn take_transaction(&self, transaction_id_hash: &str) -> Option<SessionRecord> {
+    /// claim is **session-bound**: the transaction completes only with
+    /// the access token's own session, and a mismatched principal's
+    /// poll never claims (the arm survives). The returned snapshot
+    /// retains the armed holder JWKs for the issuance the caller is
+    /// about to perform.
+    pub fn take_transaction(
+        &self,
+        transaction_id_hash: &str,
+        session_id: &SessionId,
+    ) -> Option<SessionRecord> {
         let mut inner = self.lock().ok()?;
+        let id = inner.by_transaction.get(transaction_id_hash)?;
+        if id != session_id {
+            // The transaction belongs to another session's principal:
+            // not ours to claim, and not burned by the attempt.
+            return None;
+        }
         let id = inner.by_transaction.remove(transaction_id_hash)?;
         let record = inner.records.get_mut(&id)?;
         // Snapshot BEFORE clearing: the caller issues with the armed
@@ -723,11 +736,16 @@ pub trait SessionStore: Send + Sync {
     ) -> Result<()>;
 
     /// Deferred issuance: consume a pending transaction by its
-    /// transaction-id hash. Returns the session record iff the
-    /// transaction is pending and claimed atomically (single-use —
-    /// completion transitions `issued` exactly once); `None` when
-    /// absent or already claimed.
-    async fn take_transaction(&self, transaction_id_hash: &str) -> Option<SessionRecord>;
+    /// transaction-id hash, bound to the access token's session. Returns
+    /// the session record iff the transaction is pending, OURS, and
+    /// claimed atomically (single-use — completion transitions `issued`
+    /// exactly once); `None` when absent, already claimed, or another
+    /// principal's (never burned by the attempt).
+    async fn take_transaction(
+        &self,
+        transaction_id_hash: &str,
+        session_id: &SessionId,
+    ) -> Option<SessionRecord>;
 
     /// The retention sweeper (design §6.3): expire, purge, hard-delete.
     /// One call, three phases, under the backend's own atomicity:
@@ -899,8 +917,12 @@ impl SessionStore for MemoryStore {
         MemoryStore::set_transaction(self, id, transaction_id_hash, holder_jwks)
     }
 
-    async fn take_transaction(&self, transaction_id_hash: &str) -> Option<SessionRecord> {
-        MemoryStore::take_transaction(self, transaction_id_hash)
+    async fn take_transaction(
+        &self,
+        transaction_id_hash: &str,
+        session_id: &SessionId,
+    ) -> Option<SessionRecord> {
+        MemoryStore::take_transaction(self, transaction_id_hash, session_id)
     }
 
     async fn sweep(&self, now: i64, retention_after_final_secs: i64) -> Result<SweepReport> {

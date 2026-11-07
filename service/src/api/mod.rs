@@ -64,6 +64,9 @@ pub struct AppState {
     pub scopes: std::collections::HashMap<String, String>,
     /// Endpoint paths + the request-encryption JWK (public members) for metadata.
     pub endpoint_paths: siros_issuer_core::oid4vci::EndpointPaths,
+    /// Deferred issuance (design §7.6, Final §9): the `interval` guidance
+    /// (seconds) emitted with the pending response's `transaction_id`.
+    pub deferred_interval_seconds: u64,
     /// The request-encryption key (private material, in-memory only) for
     /// decrypting wallet requests sent as application/jwt.
     pub request_encryption_key: Option<jose_rs::jwk::Jwk>,
@@ -198,6 +201,15 @@ pub fn router(state: AppState) -> axum::Router {
         .route("/authorize", axum::routing::get(wallet::authorize))
         .route("/token", axum::routing::post(wallet::token))
         .route("/credential", axum::routing::post(wallet::credential))
+        // Deferred issuance (design §7.6, Final §9): the wallet polls with
+        // the `transaction_id` from the pending credential response.
+        // Routed only when advertised — but routing unconditionally keeps
+        // the 404 honest when the toggle is off (metadata advertises the
+        // endpoint only when configured).
+        .route(
+            "/deferred-credential",
+            axum::routing::post(wallet::deferred_credential),
+        )
         .route(
             "/batch-credential",
             axum::routing::post(wallet::batch_credential),

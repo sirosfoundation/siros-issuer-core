@@ -629,10 +629,20 @@ module never sees claims even in encrypted handovers, and we state this in the m
 
 ### 7.6 Deferred issuance
 
-- Session in `pending` state returns a `transaction_id` per OID4VCI §9; the wallet polls
-  `deferred_credential`; completion transitions the session to `issued` exactly once.
-- `transaction_id` is unguessable, single-issuance, atomic (compare-and-set), with the
-  same `interval` guidance vc emits.
+**IMPLEMENTED (v2):** session in `pending` state returns a `transaction_id` per OID4VCI §9; the wallet polls
+`deferred_credential`; completion transitions the session to `issued` exactly once.
+`transaction_id` is unguessable, single-issuance, atomic (compare-and-set), with the
+same `interval` guidance vc emits. The arm (`[issuance] deferred = true`, absent = the
+immediate path only — the conformance profile) carries the proofs' **verified holder JWKs**:
+the deferred request carries only `transaction_id` (§9), so the keys the initial request
+proved must survive the deferral. The claim (`take_transaction`) is **session-bound** —
+another principal's poll never claims and never burns the arm; the DPoP sender-constraint
+check runs before the claim (a wrong key refuses without burning it). The completion
+reuses the one issuance routine (`issue_session_entries`) — one routine, two entry
+points — and encrypts per the DEFERRED request's parameters (§9.1: regardless of the
+initial request's). The metadata advertises `deferred_credential_endpoint` only when
+enabled. 3 e2e tests (pending shape + single-use + metadata; session-bound claim;
+DPoP on the poll) + the Mongo CAS test (7 store tests total).
 
 ### 7.7 Notification → feedback
 

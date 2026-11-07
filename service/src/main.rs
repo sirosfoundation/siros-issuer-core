@@ -285,6 +285,7 @@ async fn run(config_path: &str) -> siros_issuer_core::Result<()> {
         clients: Arc::new(config.authorization.clients.clone()),
         scopes: config.authorization.scopes.clone(),
         endpoint_paths,
+        deferred_interval_seconds: config.issuance.deferred_interval_seconds,
         request_encryption_key,
         cert_chain_der: load_cert_chain(&config),
         attestation: attestation_policy.clone(),

@@ -217,6 +217,7 @@ pub async fn create_session(
         sealed: Some(sealed),
         offer_uuid: Some(offer_uuid),
         transaction_id_hash: None,
+        pending_holder_jwks: None,
         pre_authorized_code_hash: Some(hex_sha(&pre_authorized_code)),
         pre_authorized_code_sealed: Some(sealed_code),
         tx_code_hash,

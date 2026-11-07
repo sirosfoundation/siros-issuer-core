@@ -668,15 +668,27 @@ impl SessionStore for MongoStore {
     }
 
     /// Deferred issuance: consume — `find_one_and_update` unsets the
-    /// transaction arm and returns the BEFORE-picture (the armed
-    /// snapshot, holder JWKs intact) in one server-side step: the session
-    /// survives (it transitions `issued`), the arm does not (single-use,
-    /// atomic). A second take misses the index.
-    async fn take_transaction(&self, transaction_id_hash: &str) -> Option<SessionRecord> {
+    /// transaction arm (filtered to the access token's own session) and
+    /// returns the BEFORE-picture (the armed snapshot, holder JWKs
+    /// intact) in one server-side step: the session survives (it
+    /// transitions `issued`), the arm does not (single-use, atomic). A
+    /// second take misses the index; another principal's poll never
+    /// matches the filter and never burns the arm.
+    async fn take_transaction(
+        &self,
+        transaction_id_hash: &str,
+        session_id: &SessionId,
+    ) -> Option<SessionRecord> {
+        let options = FindOneAndUpdateOptions::builder()
+            .return_document(ReturnDocument::Before)
+            .build();
         let before = self
             .sessions
             .find_one_and_update(
-                doc! { "transaction_id_hash": transaction_id_hash },
+                doc! {
+                    "transaction_id_hash": transaction_id_hash,
+                    "_id": session_id.as_str(),
+                },
                 doc! {
                     "$unset": {
                         "transaction_id_hash": "",
@@ -684,10 +696,9 @@ impl SessionStore for MongoStore {
                         "record.pending_holder_jwks": "",
                     }
                 },
-                mongodb::options::FindOneAndUpdateOptions::builder()
-                    .return_document(mongodb::options::ReturnDocument::Before)
-                    .build(),
             )
+            .with_options(options)
+            .max_time(OPERATION_TIMEOUT)
             .await
             .ok()??;
         record_of(&before).ok()

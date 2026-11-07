@@ -52,6 +52,8 @@ fn record(id: &SessionId, state: St, expires_at: i64) -> SessionRecord {
         pre_authorized_code_hash: Some(format!("pre-{}", id.as_str())),
         pre_authorized_code_sealed: Some(vec![4, 5, 6]),
         tx_code_hash: None,
+        transaction_id_hash: None,
+        pending_holder_jwks: None,
         tx_code_spec: None,
         auth: None,
         auth_code_hash: None,
@@ -375,4 +377,75 @@ fn hex(bytes: &[u8]) -> String {
 fn _keep_json(value: serde_json::Value) -> serde_json::Value {
     let _ = json!({});
     value
+}
+
+/// Deferred issuance (§7.6): the transaction arm is single-use and
+/// session-bound — a mismatched principal's take never claims (and never
+/// burns), the owner's take returns the ARMED snapshot (holder keys
+/// intact), and concurrent takes yield exactly one. CAS across replicas.
+#[tokio::test]
+async fn transaction_arm_is_single_use_and_session_bound() {
+    let Some((store, _coll)) = store("txn_arm").await else {
+        eprintln!("skipping: no mongod at {DEFAULT_URI} — the host mongod");
+        return;
+    };
+    let owner = session_id(7);
+    let other = session_id(8);
+    let seeded = record(&owner, St::Pending, NOW + 300);
+    // Pending arms (the state machine's Deferred transition already ran).
+    let other_record = record(&other, St::Pending, NOW + 300);
+    store.insert(seeded.clone()).await.unwrap();
+    store.insert(other_record).await.unwrap();
+    let txn = format!("urn:txn:siros:{}", owner.as_str());
+    let txn_hash = {
+        use sha2::{Digest, Sha256};
+        let digest: [u8; 32] = Sha256::digest(txn.as_bytes()).into();
+        let mut out = String::with_capacity(64);
+        for b in digest {
+            out.push_str(&format!("{b:02x}"));
+        }
+        out
+    };
+    let holder_jwk = json!({"kty": "EC", "crv": "P-256", "x": "e", "y": "d"});
+    store
+        .set_transaction(&owner, txn_hash.clone(), vec![holder_jwk.clone()])
+        .await
+        .unwrap();
+
+    // A second arm on the same session refuses.
+    let mut other_txn = txn_hash.clone();
+    other_txn.push('x'); // a distinct id, same session
+    assert!(store
+        .set_transaction(&owner, other_txn, Vec::new())
+        .await
+        .is_err());
+    // An arm on a non-pending session refuses.
+    let offered = session_id(9);
+    store
+        .insert(record(&offered, St::Offered, NOW + 300))
+        .await
+        .unwrap();
+    assert!(store
+        .set_transaction(&offered, "urn:txn:siros:offered".to_owned(), Vec::new())
+        .await
+        .is_err());
+
+    // Another principal's take never claims (and never burns).
+    assert!(store.take_transaction(&txn_hash, &other).await.is_none());
+
+    // The owner's take: the ARMED snapshot (holder keys intact).
+    let first = store.take_transaction(&txn_hash, &owner);
+    let second = store.take_transaction(&txn_hash, &owner);
+    let (a, b) = tokio::join!(first, second);
+    let wins = [a.is_some(), b.is_some()].iter().filter(|w| **w).count();
+    assert_eq!(wins, 1, "concurrent takes claim exactly once");
+    let claimed = a.or(b).unwrap();
+    assert_eq!(claimed.id, owner);
+    assert_eq!(
+        claimed.pending_holder_jwks,
+        Some(vec![holder_jwk]),
+        "the take returns the ARMED snapshot"
+    );
+    // A re-take after the claim misses.
+    assert!(store.take_transaction(&txn_hash, &owner).await.is_none());
 }

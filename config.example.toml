@@ -29,6 +29,18 @@ credential_validity_seconds = 3600
 access_token_ttl_seconds = 300
 c_nonce_ttl_seconds = 300
 
+# ── Deferred issuance (design §7.6, OpenID4VCI 1.0 §9) ────────────────────
+# When true, POST /credential arms a transaction_id and answers pending
+# ({transaction_id, interval} — no credentials, no notification_id);
+# the wallet polls POST /deferred-credential with the transaction_id and
+# the SAME access token until the credential completes (single-use:
+# a second poll of a claimed transaction refuses). Advertises
+# deferred_credential_endpoint in the metadata. Absent/false = the
+# immediate issuance path only (the conformance profile).
+# deferred = true
+# The §9 `interval` guidance (seconds) in the pending response.
+# deferred_interval_seconds = 5
+
 # ── Development: fixture catalog, no network ─────────────────────────────
 [catalog]
 static_dir = "testdata/ts11"

@@ -14,9 +14,10 @@ use axum::response::Response;
 use axum::Json;
 use serde_json::{json, Value};
 use siros_issuer_core::oid4vci::{
-    CredentialEntry, CredentialOffer, CredentialRequest, CredentialResponse,
-    GrantPreAuthorizedCode, NotificationRequest, TokenResponse, GRANT_PRE_AUTHORIZED_CODE,
-    NOTIFICATION_ACCEPTED, NOTIFICATION_DELETED, NOTIFICATION_FAILURE,
+    CredentialEntry, CredentialMetadata, CredentialOffer, CredentialRequest, CredentialResponse,
+    CredentialResponseEncryption, DeferredCredentialRequest, GrantPreAuthorizedCode,
+    NotificationRequest, TokenResponse, GRANT_PRE_AUTHORIZED_CODE, NOTIFICATION_ACCEPTED,
+    NOTIFICATION_DELETED, NOTIFICATION_FAILURE,
 };
 use siros_issuer_core::response::encrypt_response;
 
@@ -665,8 +666,6 @@ async fn credential_inner(
         .batch_credential
         .map(|(_, size)| size as usize)
         .unwrap_or(1);
-    let is_mdoc =
-        catalog_format(&state, &record.credential_configuration_id).as_deref() == Some("mso_mdoc");
     if now >= record.c_nonce_expires_unix {
         return Err(credential_err(
             &state,
@@ -763,7 +762,7 @@ async fn credential_inner(
                 hex_of(&transaction_id),
                 holder_jwks
                     .iter()
-                    .map(|jwk| serde_json::to_value(jwk))
+                    .map(serde_json::to_value)
                     .collect::<Result<_, _>>()
                     .map_err(|e| err(Error::invalid_input(format!("holder jwk: {e}"))))?,
             )
@@ -782,8 +781,7 @@ async fn credential_inner(
         return credential_response(&state, &headers, &response, None);
     }
 
-    let (entries, metadata) =
-        issue_session_entries(&state, &record, &holder_jwks, now).await?;
+    let (entries, metadata) = issue_session_entries(&state, &record, &holder_jwks, now).await?;
 
     let response = CredentialResponse {
         credentials: entries,
@@ -792,7 +790,12 @@ async fn credential_inner(
         notification_id: Some(record.notification_id.clone()),
         credential_metadata: metadata,
     };
-    credential_response(&state, &headers, &response, request.credential_response_encryption.as_ref())
+    credential_response(
+        &state,
+        &headers,
+        &response,
+        request.credential_response_encryption.as_ref(),
+    )
 }
 
 /// Build the credential response (shared by `/credential` and
@@ -972,6 +975,162 @@ fn hex_of(value: &str) -> String {
     hex(&Sha256::digest(value.as_bytes()))
 }
 
+/// RFC 9449 §4: a DPoP-bound access token demands a fresh proof whose
+/// `ath` is this token's hash and whose key thumbprint matches the
+/// binding minted at /token. Enforced identically at `/credential`
+/// and `/deferred-credential` (Final §9 — the same access token).
+#[allow(clippy::result_large_err)]
+fn enforce_sender_constrained_token(
+    state: &AppState,
+    headers: &HeaderMap,
+    bound_jkt: &Option<String>,
+    endpoint: &str,
+    now: i64,
+) -> HandlerResult<()> {
+    let Some(bound_jkt) = bound_jkt else {
+        return Ok(());
+    };
+    let proof = headers
+        .get("dpop")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| {
+            err(Error::invalid_input(
+                "DPoP proof required for this access token",
+            ))
+        })?;
+    let access_token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or_default();
+    let ath = crate::dpop::access_token_hash(access_token);
+    let htu = state
+        .issuer_base
+        .join(endpoint)
+        .map_err(|e| err(Error::configuration(e.to_string())))?;
+    let verified = state
+        .dpop
+        .validate(proof, "POST", &htu, now, Some(&ath))
+        .map_err(err)?;
+    if &verified.jkt != bound_jkt {
+        return Err(err(Error::invalid_input(
+            "DPoP key does not match the access token binding",
+        )));
+    }
+    Ok(())
+}
+
+/// Final §9 `transaction_id`: unguessable (OS randomness), single-use
+/// (the store's arm is compare-and-set), invalidated once the credential
+/// is obtained (design §7.6).
+#[allow(clippy::result_large_err)]
+fn fresh_transaction_id() -> HandlerResult<String> {
+    Ok(random_handle("urn:txn:siros:", 32))
+}
+
+/// `POST /deferred-credential` (Final §9 Deferred Credential Endpoint,
+/// design §7.6): the wallet polls with the `transaction_id` from the
+/// pending credential response.
+///
+/// The transaction's single-use arm is consumed atomically (take under
+/// the lock): a concurrent or repeated poll misses — one completion, the
+/// session transitions `issued` exactly once, and the second take
+/// answers `invalid_transaction_id` (the spec's error for an unknown or
+/// already-claimed transaction; §9.2). The issuance itself runs on the
+/// ARMED holder keys (the deferred request carries no proofs — §9's
+/// body is `transaction_id` alone), over the same one routine as the
+/// immediate path (`issue_session_entries` — one issuance routine, two
+/// entry points). The response is encrypted per THIS request's
+/// `credential_response_encryption` parameters (§9.1: "regardless of
+/// what was sent in the initial Credential Request").
+#[allow(clippy::result_large_err)]
+pub async fn deferred_credential(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: String,
+) -> HandlerResult<Response> {
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+    let request: DeferredCredentialRequest = if content_type.starts_with("application/jwt") {
+        // Final §9.1: the deferred request may be a JWE like the initial
+        // Credential Request (§10).
+        let key = state.request_encryption_key.clone().ok_or_else(|| {
+            err(Error::configuration(
+                "credential_request_encryption is not configured",
+            ))
+        })?;
+        let plaintext = siros_issuer_core::response::decrypt_request(&body, &key).map_err(err)?;
+        serde_json::from_slice(&plaintext)
+            .map_err(|e| err(Error::invalid_credential_request(e.to_string())))?
+    } else {
+        serde_json::from_str(&body)
+            .map_err(|e| err(Error::invalid_credential_request(e.to_string())))?
+    };
+    let now = now_unix();
+    // Order of checks, exactly the Mode B discipline: the
+    // sender-constraint check is read-only, so it runs FIRST (a wrong
+    // key refuses without burning the single-use arm); the arm-claim is
+    // second. The deferred request rides the SAME access token as the
+    // initial one (Final §9), so the binding enforced here is the
+    // token's.
+    let token_hash = bearer_token_hash(&headers)
+        .ok_or_else(|| err(Error::invalid_input("missing Bearer access token")))?;
+    let (session_id, dpop_jkt) = state
+        .sessions
+        .session_by_access_token(&token_hash, now)
+        .await
+        .ok_or_else(|| err(Error::invalid_input("unknown or expired access token")))?;
+    enforce_sender_constrained_token(&state, &headers, &dpop_jkt, "deferred-credential", now)?;
+
+    // The single-use arm: atomic consume, session-bound (a mismatched
+    // principal's poll never claims). None = unknown, already claimed,
+    // or another session's (§9.2 invalid_transaction_id).
+    let record = state
+        .sessions
+        .take_transaction(&hex_of(&request.transaction_id), &session_id)
+        .await
+        .ok_or_else(|| {
+            credential_err(
+                &state,
+                &Error::new(
+                    siros_issuer_core::error::code::INVALID_INPUT,
+                    "transaction_id is unknown, expired, or already claimed",
+                ),
+            )
+        })?;
+    // The armed holder keys (the deferred request carries no proofs).
+    let holder_jwks: Vec<jose_rs::jwk::Jwk> = record
+        .pending_holder_jwks
+        .clone()
+        .unwrap_or_default()
+        .iter()
+        .map(|v| serde_json::from_value(v.clone()))
+        .collect::<Result<_, _>>()
+        .map_err(|e| err(Error::invalid_input(format!("armed holder key: {e}"))))?;
+
+    // One issuance routine, two entry points (§7.6): the entries'
+    // builders run the `issued` transition internally, exactly as the
+    // immediate path does.
+    let (entries, metadata) = issue_session_entries(&state, &record, &holder_jwks, now).await?;
+
+    let response = CredentialResponse {
+        credentials: entries,
+        transaction_id: None,
+        interval: None,
+        notification_id: Some(record.notification_id.clone()),
+        credential_metadata: metadata,
+    };
+    credential_response(
+        &state,
+        &headers,
+        &response,
+        request.credential_response_encryption.as_ref(),
+    )
+}
+
 // ─── P2: the wallet-initiated authorization-code grant (design §7.2) ─────
 
 use siros_issuer_core::oid4vci::{ParReply, ParRequest, GRANT_AUTHORIZATION_CODE};
@@ -1123,6 +1282,7 @@ async fn par_inner(
         offer_uuid: Some(offer_uuid.clone()),
         pre_authorized_code_hash: None,
         transaction_id_hash: None,
+        pending_holder_jwks: None,
         pre_authorized_code_sealed: None,
         tx_code_hash: None,
         tx_code_spec: None,

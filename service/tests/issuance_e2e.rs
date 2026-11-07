@@ -245,7 +245,7 @@ async fn spawn_service(
     let (signer, private) = signer_pair;
     let public = siros_issuer_core::signer::Signer::public_jwk(&signer).expect("public jwk");
     let cert_chain = signer_cert_chain(&private);
-    let svc = spawn_service_dyn(pdp, allocator, Arc::new(signer), public, cert_chain).await;
+    let svc = spawn_service_dyn(pdp, allocator, Arc::new(signer), public, cert_chain, false).await;
     TestService {
         base: svc.base,
         // The file key verifies the oracles (public material).
@@ -253,14 +253,35 @@ async fn spawn_service(
     }
 }
 
+/// The deferred-issuance surface (§7.6): same spawn, `deferred = true` —
+/// /credential arms a transaction and answers pending;
+/// /deferred-credential completes.
+async fn spawn_service_deferred(
+    pdp: Arc<dyn TrustPdp>,
+    allocator: Arc<RecordingAllocator>,
+    signer_pair: (siros_issuer_core::signer::JwkSigner, jose_rs::jwk::Jwk),
+) -> TestService {
+    let (signer, private) = signer_pair;
+    let public = siros_issuer_core::signer::Signer::public_jwk(&signer).expect("public jwk");
+    let cert_chain = signer_cert_chain(&private);
+    let svc = spawn_service_dyn(pdp, allocator, Arc::new(signer), public, cert_chain, true).await;
+    TestService {
+        base: svc.base,
+        signer: siros_issuer_core::signer::JwkSigner::new(private).expect("signer"),
+    }
+}
+
 /// Spawn with any `signer::Signer` provider (the HSM test signs through
 /// its provider; the public JWK / cert chain ride along for the oracles).
+/// `deferred` arms the deferred-issuance surface (§7.6): the credential
+/// endpoint answers pending and `/deferred-credential` completes.
 async fn spawn_service_dyn(
     pdp: Arc<dyn TrustPdp>,
     allocator: Arc<RecordingAllocator>,
     signer: Arc<dyn siros_issuer_core::signer::Signer>,
     _public: jose_rs::jwk::Jwk,
     cert_chain_der: Vec<Vec<u8>>,
+    deferred: bool,
 ) -> SignerAgnosticService {
     // Any port: issuer_base is what signed URLs carry; bind 0 and use it.
     let issuer_base = Url::parse("http://127.0.0.1:8080").unwrap();
@@ -293,8 +314,10 @@ async fn spawn_service_dyn(
         scopes: std::collections::HashMap::new(),
         endpoint_paths: siros_issuer_core::oid4vci::EndpointPaths {
             batch_credential: Some(("batch-credential", 4)),
+            deferred_credential: deferred.then_some("deferred-credential"),
             ..Default::default()
         },
+        deferred_interval_seconds: 5,
         request_encryption_key: None,
         cert_chain_der: cert_chain_der.clone(),
         attestation: Arc::new(siros_issuer_service::client_auth::WildcardRulesPolicy::new(
@@ -419,6 +442,447 @@ async fn create_session(
         .await
         .unwrap();
     (response, parsed)
+}
+
+/// Mint a pre-auth session and redeem it to a DPoP-free access token
+/// (the deferred tests' base), returning the offer + access token.
+async fn deferred_arm(service: &TestService, subject: Value) -> (Value, String) {
+    let client = reqwest::Client::new();
+    let integrator = ec_key();
+    let (created, _) = create_session(
+        service,
+        &integrator,
+        json!({"credential": "urn:eudi:pid:1", "subject": subject, "grant": {"tx_code": {"value": "654321"}}}),
+    )
+    .await;
+    let body: Value = created.json().await.unwrap();
+    let offer_uri = body["offer_uri"].as_str().unwrap().to_owned();
+    let offer: Value = client
+        .get(format!(
+            "{}{}",
+            service.base,
+            offer_uri.trim_start_matches(ISSUER_BASE)
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let code = offer["grants"][GRANT_PRE_AUTHORIZED_CODE]["pre-authorized_code"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let token: Value = client
+        .post(format!("{}/token", service.base))
+        .form(&token_form(&[
+            ("grant_type", GRANT_PRE_AUTHORIZED_CODE.to_owned()),
+            ("pre_authorized_code", code),
+            ("tx_code", "654321".to_owned()),
+        ]))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let access_token = token["access_token"].as_str().unwrap().to_owned();
+    (offer, access_token)
+}
+
+/// POST /credential with a fresh jwt proof — under the deferred surface
+/// this ARMS a transaction and answers pending (Final §9): the response
+/// carries {transaction_id, interval} and MUST NOT carry credentials or
+/// notification_id (§8.3's closed set). Returns the parsed response.
+async fn credential_request_pending(
+    service: &TestService,
+    offer: &Value,
+    access_token: &str,
+) -> Value {
+    let client = reqwest::Client::new();
+    let holder = ec_key();
+    // Fetch the session's c_nonce through the public nonce endpoint
+    // (the proof binds whatever the wallet holds; the endpoint mints).
+    let nonce: Value = client
+        .post(format!("{}/nonce", service.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let c_nonce = nonce["c_nonce"].as_str().unwrap().to_owned();
+    let proof = proof_jwt(&holder, &Url::parse(ISSUER_BASE).unwrap(), &c_nonce);
+    let response = client
+        .post(format!("{}/credential", service.base))
+        .bearer_auth(access_token)
+        .json(&json!({
+            "credential_configuration_id": offer["credential_configuration_ids"][0],
+            "proof": { "proof_type": "jwt", "jwt": proof },
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        response.status().is_success(),
+        "credential endpoint (deferred arm): {}",
+        response.status()
+    );
+    response.json().await.unwrap()
+}
+
+/// Deferred issuance (design §7.6, Final §9): /credential answers
+/// pending with a transaction_id (credentials and notification_id
+/// absent — §8.3's closed set), the metadata advertises the deferred
+/// endpoint, /deferred-credential completes the issuance exactly once,
+/// and the completed transaction is single-use: a second poll refuses.
+#[tokio::test]
+async fn deferred_issuance_answers_pending_then_completes_exactly_once() {
+    let allocator = Arc::new(RecordingAllocator {
+        list_url: Url::parse("http://127.0.0.1:9/lists/x").unwrap(),
+        next_index: AtomicU64::new(0),
+        updates: Mutex::new(Vec::new()),
+    });
+    let service = spawn_service_deferred(Arc::new(PermitPdp), allocator, test_signer()).await;
+    let client = reqwest::Client::new();
+
+    let (offer, access_token) = deferred_arm(
+        &service,
+        json!({"given_name": "Deferred", "family_name": "Wallet"}),
+    )
+    .await;
+
+    // The arm: pending, §8.3's closed set respected.
+    let pending = credential_request_pending(&service, &offer, &access_token).await;
+    let transaction_id = pending["transaction_id"]
+        .as_str()
+        .expect("pending response carries transaction_id")
+        .to_owned();
+    assert!(!transaction_id.is_empty(), "transaction_id is not empty");
+    assert_eq!(
+        pending["interval"], 5,
+        "interval guidance rides the pending response"
+    );
+    assert!(
+        pending["credentials"].is_null(),
+        "no credentials in the pending response (Final §8.3)"
+    );
+    assert!(
+        pending["notification_id"].is_null(),
+        "no notification_id without credentials (Final §8.3)"
+    );
+
+    // The metadata advertises the deferred endpoint (only when enabled
+    // — endpoint_paths drives it).
+    let metadata: Value = client
+        .get(format!(
+            "{}/.well-known/openid-credential-issuer",
+            service.base
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        metadata["deferred_credential_endpoint"]
+            .as_str()
+            .unwrap_or("")
+            .ends_with("/deferred-credential"),
+        "deferred_credential_endpoint advertised: {}",
+        metadata["deferred_credential_endpoint"]
+    );
+
+    // The completion: one poll issues the credential (verified by
+    // verifier-core, the P1 discipline).
+    let completed: Value = client
+        .post(format!("{}/deferred-credential", service.base))
+        .bearer_auth(&access_token)
+        .json(&json!({"transaction_id": transaction_id}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let issued = completed["credentials"][0]["credential"]
+        .as_str()
+        .expect("the deferred completion carries the credential")
+        .to_owned();
+    assert_eq!(completed["credentials"][0]["format"], "dc+sd-jwt");
+    assert!(
+        completed["notification_id"].is_string(),
+        "the completion carries notification_id (credentials present)"
+    );
+    verify_sdjwt(
+        &issued,
+        &StaticKey(service.signer.public_jwk().expect("public jwk")),
+        &VerifyParams::new(now_unix(), HolderBinding::NotRequired),
+    )
+    .expect("the deferred-completed credential verifies in verifier-core");
+
+    // Single-use (Final §9: the transaction_id MUST be invalidated once
+    // obtained): the second poll refuses.
+    let second = client
+        .post(format!("{}/deferred-credential", service.base))
+        .bearer_auth(&access_token)
+        .json(&json!({"transaction_id": transaction_id}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        second.status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "a claimed transaction refuses on re-poll"
+    );
+    let refused: Value = second.json().await.unwrap();
+    assert!(
+        refused["error"].is_string(),
+        "the refusal is the 1.0 Final error shape: {refused}"
+    );
+
+    // An unknown transaction_id refuses the same way.
+    let unknown = client
+        .post(format!("{}/deferred-credential", service.base))
+        .bearer_auth(&access_token)
+        .json(&json!({"transaction_id": "urn:txn:siros:not-armed"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), reqwest::StatusCode::BAD_REQUEST);
+}
+
+/// The deferred transaction is bound to its own session's access token:
+/// another principal's poll refuses AND never burns the arm — the
+/// owning token still completes (§9's single-use is a claim by the
+/// rightful principal only).
+#[tokio::test]
+async fn deferred_poll_is_bound_to_its_own_access_token() {
+    let allocator = Arc::new(RecordingAllocator {
+        list_url: Url::parse("http://127.0.0.1:9/lists/x").unwrap(),
+        next_index: AtomicU64::new(0),
+        updates: Mutex::new(Vec::new()),
+    });
+    let service = spawn_service_deferred(Arc::new(PermitPdp), allocator, test_signer()).await;
+    let client = reqwest::Client::new();
+
+    // Two armed sessions: A (the owner) and B (another principal).
+    let (offer_a, token_a) =
+        deferred_arm(&service, json!({"given_name": "Owner", "family_name": "A"})).await;
+    let (_offer_b, token_b) =
+        deferred_arm(&service, json!({"given_name": "Other", "family_name": "B"})).await;
+    let pending = credential_request_pending(&service, &offer_a, &token_a).await;
+    let transaction_id = pending["transaction_id"]
+        .as_str()
+        .expect("transaction_id")
+        .to_owned();
+
+    // B polls A's transaction: refused.
+    let refused = client
+        .post(format!("{}/deferred-credential", service.base))
+        .bearer_auth(&token_b)
+        .json(&json!({"transaction_id": transaction_id}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        refused.status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "another principal's poll refuses"
+    );
+
+    // The arm survived: A's own poll still completes.
+    let completed: Value = client
+        .post(format!("{}/deferred-credential", service.base))
+        .bearer_auth(&token_a)
+        .json(&json!({"transaction_id": transaction_id}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        completed["credentials"][0]["credential"].is_string(),
+        "the owning token completes after the foreign refusal"
+    );
+}
+
+/// A DPoP-bound access token demands its proof at /deferred-credential
+/// too (RFC 9449 §4; Final §9 rides the same token): a proofless poll
+/// refuses WITHOUT burning the arm (the check precedes the claim), and
+/// the rightful proof completes.
+#[tokio::test]
+async fn dpop_bound_deferred_poll_requires_its_proof() {
+    let allocator = Arc::new(RecordingAllocator {
+        list_url: Url::parse("http://127.0.0.1:9/lists/x").unwrap(),
+        next_index: AtomicU64::new(0),
+        updates: Mutex::new(Vec::new()),
+    });
+    let service = spawn_service_deferred(Arc::new(PermitPdp), allocator, test_signer()).await;
+    let client = reqwest::Client::new();
+
+    // Session + offer (the DPoP binding is minted at /token).
+    let integrator = ec_key();
+    let (created, _) = create_session(
+        &service,
+        &integrator,
+        json!({"credential": "urn:eudi:pid:1", "subject": {"given_name": "D", "family_name": "X"}, "grant": {"tx_code": {"value": "654321"}}}),
+    )
+    .await;
+    let body: Value = created.json().await.unwrap();
+    let offer_uri = body["offer_uri"].as_str().unwrap().to_owned();
+    let offer: Value = client
+        .get(format!(
+            "{}{}",
+            service.base,
+            offer_uri.trim_start_matches(ISSUER_BASE)
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let code = offer["grants"][GRANT_PRE_AUTHORIZED_CODE]["pre-authorized_code"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let dpop_key = ec_key();
+    let now = now_unix();
+    let jti = || {
+        siros_issuer_core::sdjwt_issue::b64u(&{
+            let mut b = [0u8; 16];
+            getrandom::fill(&mut b).expect("OS randomness");
+            b
+        })
+    };
+    let dpop_proof = |htm: &str, htu: &str, ath: Option<&str>| {
+        let mut claims = json!({"htm": htm, "htu": htu, "iat": now, "jti": jti()});
+        if let Some(ath) = ath {
+            claims["ath"] = json!(ath);
+        }
+        sign_jwt(&dpop_key, "dpop+jwt", &claims, true)
+    };
+    let token: Value = client
+        .post(format!("{}/token", service.base))
+        .header(
+            "DPoP",
+            dpop_proof(
+                "POST",
+                Url::parse(ISSUER_BASE)
+                    .unwrap()
+                    .join("token")
+                    .unwrap()
+                    .as_str(),
+                None,
+            ),
+        )
+        .form(&token_form(&[
+            ("grant_type", GRANT_PRE_AUTHORIZED_CODE.to_owned()),
+            ("pre_authorized_code", code),
+            ("tx_code", "654321".to_owned()),
+        ]))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let access_token = token["access_token"].as_str().unwrap().to_owned();
+
+    // Arm the transaction (/credential with the DPoP proof + jwt proof).
+    let holder = ec_key();
+    let nonce: Value = client
+        .post(format!("{}/nonce", service.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let cred_proof = proof_jwt(
+        &holder,
+        &Url::parse(ISSUER_BASE).unwrap(),
+        nonce["c_nonce"].as_str().unwrap(),
+    );
+    let pending: Value = client
+        .post(format!("{}/credential", service.base))
+        .header(
+            "DPoP",
+            dpop_proof(
+                "POST",
+                Url::parse(ISSUER_BASE)
+                    .unwrap()
+                    .join("credential")
+                    .unwrap()
+                    .as_str(),
+                Some(&siros_issuer_service::dpop::access_token_hash(
+                    &access_token,
+                )),
+            ),
+        )
+        .bearer_auth(&access_token)
+        .json(&json!({
+            "credential_configuration_id": "urn:eudi:pid:1",
+            "proof": { "proof_type": "jwt", "jwt": cred_proof },
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let transaction_id = pending["transaction_id"]
+        .as_str()
+        .expect("DPoP-bound arm still yields the transaction")
+        .to_owned();
+
+    // Proofless poll: refused, arm intact.
+    let refused = client
+        .post(format!("{}/deferred-credential", service.base))
+        .bearer_auth(&access_token)
+        .json(&json!({"transaction_id": transaction_id}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        refused.status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "a DPoP-bound token refuses a proofless deferred poll"
+    );
+
+    // The rightful proof completes.
+    let completed: Value = client
+        .post(format!("{}/deferred-credential", service.base))
+        .header(
+            "DPoP",
+            dpop_proof(
+                "POST",
+                Url::parse(ISSUER_BASE)
+                    .unwrap()
+                    .join("deferred-credential")
+                    .unwrap()
+                    .as_str(),
+                Some(&siros_issuer_service::dpop::access_token_hash(
+                    &access_token,
+                )),
+            ),
+        )
+        .bearer_auth(&access_token)
+        .json(&json!({"transaction_id": transaction_id}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        completed["credentials"][0]["credential"].is_string(),
+        "the DPoP-proven deferred poll completes"
+    );
 }
 
 /// The whole wallet-side redemption, returning the issued credential
@@ -2743,6 +3207,7 @@ async fn hsm_signer_serves_both_credential_formats() {
         signer,
         public.clone(),
         vec![token.cert_der.clone()],
+        false,
     )
     .await;
     let client = reqwest::Client::new();
@@ -2979,6 +3444,7 @@ async fn retention_sweeper_expires_purges_and_hard_deletes() {
         sealed: Some(vec![1, 2, 3]),
         offer_uuid: Some(format!("offer-{tag}")),
         transaction_id_hash: None,
+        pending_holder_jwks: None,
         pre_authorized_code_hash: Some(format!("hash-{tag}")),
         pre_authorized_code_sealed: Some(vec![4, 5, 6]),
         tx_code_hash: None,
