@@ -345,30 +345,67 @@ pub async fn token(
     let grant_type = get("grant_type").unwrap_or_default();
     let now = now_unix();
 
-    // Client authentication (design §12.2-resolved): the OIDF issuer plan
-    // speaks private_key_jwt — RFC 7523 against the pre-registered set.
+    // Client authentication (design §12.2-resolved + §12.1 WIA/KA): the
+    // OIDF issuer plan speaks private_key_jwt — RFC 7523 against the
+    // pre-registered set. **Wallet attestation** (draft-ietf-oauth-
+    // attestation-based-client-auth) is the second path: headers per
+    // draft §3.1 (`OAuth-Client-Attestation` + PoP) or the legacy
+    // form-body `client_assertion` (no PoP), vc's token-handler flow —
+    // registered clients first, attestation when the client is not (or
+    // the attestation headers are present).
     let client_assertion = get("client_assertion");
     let assertion_type = get("client_assertion_type");
     let client_id = get("client_id");
-    match (assertion_type.as_deref(), client_assertion.as_deref()) {
-        (Some("urn:ietf:params:oauth:client-assertion-type:jwt-bearer"), Some(assertion)) => {
-            crate::client_auth::verify_private_key_jwt(
-                &state.clients,
-                assertion,
-                // RFC 7523 §3: client_id may be absent — the client is the
-                // assertion's iss (the suite's token requests omit it).
-                client_id.as_deref(),
-                // The suite signs aud = the issuer identifier.
-                &state.issuer_base,
-                now,
-                60,
-            )
-            .map_err(oauth_err)?;
+    let attestation_header = headers
+        .get("oauth-client-attestation")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let attestation_pop = headers
+        .get("oauth-client-attestation-pop")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    // The credential scope for tier authorization: the bound code's scope
+    // — never a caller-supplied wildcard (vc re-checks against what the
+    // PAR/offer authorized).
+    let requested_scope = get("scope");
+    match (attestation_header.as_deref(), attestation_pop.as_deref()) {
+        // Draft §3.1 headers: PoP is REQUIRED with the attestation header.
+        (Some(attestation), pop) => {
+            let evaluator = state.wallet_attestation.as_ref().ok_or_else(|| {
+                oauth_err(Error::configuration(
+                    "wallet attestation auth is not configured (authorization.attestation.wallet)",
+                ))
+            })?;
+            let pop = pop.unwrap_or("");
+            let scope = requested_scope.as_deref().unwrap_or("");
+            evaluator
+                .evaluate_with_pop(attestation, pop, scope)
+                .await
+                .map_err(oauth_err)?;
         }
-        _ => {
-            return Err(oauth_err(Error::invalid_input(
-                "client authentication required: private_key_jwt (client_assertion)",
-            )))
+        // No headers: RFC 7523 private_key_jwt against the registry.
+        (None, _) => {
+            match (assertion_type.as_deref(), client_assertion.as_deref()) {
+                (Some("urn:ietf:params:oauth:client-assertion-type:jwt-bearer"), Some(assertion)) => {
+                    crate::client_auth::verify_private_key_jwt(
+                        &state.clients,
+                        assertion,
+                        // RFC 7523 §3: client_id may be absent — the client is the
+                        // assertion's iss (the suite's token requests omit it).
+                        client_id.as_deref(),
+                        // The suite signs aud = the issuer identifier.
+                        &state.issuer_base,
+                        now,
+                        60,
+                    )
+                    .map_err(oauth_err)?;
+                }
+                _ => {
+                    return Err(oauth_err(Error::invalid_input(
+                        "client authentication required: private_key_jwt (client_assertion) or OAuth-Client-Attestation (WIA)",
+                    )))
+                }
+            }
         }
     }
 
@@ -1045,6 +1082,7 @@ async fn par_inner(
         sealed: None,
         offer_uuid: Some(offer_uuid.clone()),
         pre_authorized_code_hash: None,
+        transaction_id_hash: None,
         pre_authorized_code_sealed: None,
         tx_code_hash: None,
         tx_code_spec: None,

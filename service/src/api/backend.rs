@@ -216,6 +216,7 @@ pub async fn create_session(
         credential_configuration_id: credential.identifier.clone(),
         sealed: Some(sealed),
         offer_uuid: Some(offer_uuid),
+        transaction_id_hash: None,
         pre_authorized_code_hash: Some(hex_sha(&pre_authorized_code)),
         pre_authorized_code_sealed: Some(sealed_code),
         tx_code_hash,

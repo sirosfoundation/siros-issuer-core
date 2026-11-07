@@ -130,3 +130,17 @@ offer_per_minute = 20        # GET credential-offer
 credential_per_minute = 30  # POST credential + batch-credential
 token_per_minute = 20       # POST token (both grants)
 challenge_per_minute = 20   # POST authorization-challenge (+ Mode B response)
+
+# ── Wallet attestation auth (WIA/KA, design §12.1) ───────────────────────
+# Attestation-based client auth at the token endpoint, on the same tier
+# policy layer as the attestation rules above. The WIA's signature
+# verifies locally (x5c / jwk header / kid+JWKS at iss); wallet-provider
+# trust goes to go-trust (action `wallet_provider`); then the tier policy
+# (attestation_source → scope). Headers per draft-ietf-oauth-
+# attestation-based-client-auth §3.1 (PoP required); the legacy
+# form-body client_assertion carries no PoP. Absent ⇒ private_key_jwt
+# only (the conformance profile).
+#
+# [authorization.attestation.wallet]
+# # etsi (x5c) | ietf (iss/JWKS) | empty = either:
+# mode = ""

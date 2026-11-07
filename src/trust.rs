@@ -66,3 +66,51 @@ impl IssuanceTrustQuery {
         })
     }
 }
+
+/// Wallet-provider trust (design §12.1): may this **already-verified**
+/// WIA signing key belong to a trusted wallet provider? The AuthZEN
+/// action name is the role, mirroring vc's `RoleWalletProvider`
+/// (go-trust decides; the issuer never creates local trust).
+///
+/// This is trust in the *attestation issuer*, distinct from both the
+/// issuance trust query (the integrating application, action `issue`)
+/// and the tier policy (attestation_source → scope authorization).
+#[derive(Clone, Debug)]
+pub struct WalletProviderTrustQuery {
+    /// The wallet provider identifier: the x5c leaf's SAN (DNS > URI) or
+    /// CN (ETSI/TS 119 472-3), or the `iss` claim (IETF draft).
+    pub subject_id: String,
+    /// Standard-base64 DER certificates, leaf first (ETSI mode).
+    pub x5c: Vec<String>,
+    /// The verified signing JWK (IETF mode).
+    pub jwk: Value,
+}
+
+impl WalletProviderTrustQuery {
+    pub fn new(subject_id: impl Into<String>, x5c: Vec<String>, jwk: Value) -> Self {
+        Self {
+            subject_id: subject_id.into(),
+            x5c,
+            jwk,
+        }
+    }
+
+    /// AuthZEN evaluation request for go-trust — action name = role
+    /// (`wallet_provider`), the same construction verifier-core uses.
+    pub fn to_authzen(&self) -> Value {
+        debug_assert!(
+            !(self.x5c.is_empty() && self.jwk.is_null()),
+            "WalletProviderTrustQuery needs x5c or jwk evidence"
+        );
+        let (resource_type, key) = if self.x5c.is_empty() {
+            ("jwk", json!([self.jwk]))
+        } else {
+            ("x5c", json!(self.x5c))
+        };
+        json!({
+            "subject":  { "type": "key", "id": self.subject_id },
+            "resource": { "type": resource_type, "id": self.subject_id, "key": key },
+            "action":   { "name": "wallet_provider", "parameters": {} },
+        })
+    }
+}

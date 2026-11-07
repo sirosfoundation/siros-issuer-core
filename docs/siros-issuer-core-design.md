@@ -1072,9 +1072,21 @@ machine, never as a parallel path.
    verification; `client_id` may be absent — RFC 7523 §3 derives it from the
    assertion `iss`) and the **attestation policy layer** translated from vc's
    `WalletAttestationPolicyEngine` (wildcard rules default-open; PDP provider the
-   production path). Remaining: the attestation-JWT verification itself
-   (etsi x5c / ietf iss-JWKS modes, vc's `WalletAttestationEvaluator`) when the
-   suite's `client_attestation` variants come into scope.
+   production path). **DONE (v2): the attestation-JWT verification itself**
+   (`service/src/wallet_attestation.rs`, vc's `WalletAttestationEvaluator`
+   ported faithfully): etsi x5c / ietf iss-JWKS modes (pinned by
+   `[authorization.attestation.wallet] mode`, enforced before any signature
+   verification), local signature verification (x5c leaf / jwk header /
+   kid+JWKS at iss, https-only), wallet-provider trust via a third PDP
+   decision (`TrustPdp::permit_wallet_provider`, action `wallet_provider`
+   — vc's RoleWalletProvider; `WalletProviderTrustQuery` in the core), then
+   the tier policy. PoP per draft §5.2 (typ oauth-client-attestation-pop+jwt,
+   cnf.jwk signature, aud, exp/iat), legacy empty-pop accepted. Token
+   endpoint: `OAuth-Client-Attestation`(+`-PoP`) headers or RFC 7523.
+   7 tests: both modes end-to-end, mode pinning, untrusted refusal,
+   malformed-x5c fail-closed, iss↔cert disagreement, PoP positive/negative
+   + legacy. Config absent ⇒ private_key_jwt only (the conformance profile,
+   unchanged).
 2. **Mode B process topology:** in-process embedding of verifier-core crates is the v1
    default (simplest, single binary). Should a deployment mode that delegates
    presentation verification to a deployed siros-verifier-service (via a signed receipt

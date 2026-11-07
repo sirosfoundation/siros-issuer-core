@@ -227,6 +227,39 @@ async fn run(config_path: &str) -> siros_issuer_core::Result<()> {
         Arc::new(store::MemoryStore::new())
     };
 
+    // The attestation tier policy (design §12.1): the same layer serves
+    // wallet attestation (WIA/KA) — vc's WalletAttestationPolicyEngine.
+    let attestation_policy: std::sync::Arc<
+        dyn siros_issuer_service::client_auth::AttestationPolicy,
+    > = if config.authorization.attestation.use_pdp {
+        Arc::new(siros_issuer_service::client_auth::PdpAttestationPolicy::new(pdp.clone()))
+    } else {
+        Arc::new(siros_issuer_service::client_auth::WildcardRulesPolicy::new(
+            config.authorization.attestation.rules.clone(),
+        ))
+    };
+    // Wallet attestation (§12.1): the evaluator over the same policy
+    // layer — `None` when unconfigured (private_key_jwt only).
+    let wallet_attestation = config
+        .authorization
+        .attestation
+        .wallet
+        .as_ref()
+        .map(|wallet_cfg| {
+            std::sync::Arc::new(
+                siros_issuer_service::wallet_attestation::WalletAttestationEvaluator::new(
+                    pdp.clone(),
+                    attestation_policy.clone(),
+                    siros_issuer_service::wallet_attestation::WiaMode::parse(&wallet_cfg.mode)
+                        .unwrap_or_else(|e| {
+                            eprintln!("siros-issuer-service: {e}");
+                            std::process::exit(1);
+                        }),
+                    issuer_base.clone(),
+                ),
+            )
+        });
+
     let state = AppState {
         catalog: Arc::new(RwLock::new(Arc::new(catalog))),
         issuer_base,
@@ -250,13 +283,8 @@ async fn run(config_path: &str) -> siros_issuer_core::Result<()> {
         endpoint_paths,
         request_encryption_key,
         cert_chain_der: load_cert_chain(&config),
-        attestation: if config.authorization.attestation.use_pdp {
-            Arc::new(siros_issuer_service::client_auth::PdpAttestationPolicy::new(pdp.clone()))
-        } else {
-            Arc::new(siros_issuer_service::client_auth::WildcardRulesPolicy::new(
-                config.authorization.attestation.rules.clone(),
-            ))
-        },
+        attestation: attestation_policy.clone(),
+        wallet_attestation,
         signer: signer_dyn.clone(),
         vault: Arc::new(vault::Vault::new()?),
         pdp,

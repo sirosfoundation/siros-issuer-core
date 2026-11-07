@@ -90,6 +90,11 @@ pub struct AppState {
     pub circuit_manifest: Option<std::sync::Arc<siros_issuer_core::zk::circuit::CircuitManifest>>,
     /// Wallet-surface rate limiting (§11): vc defaults unless configured.
     pub rate_limit: crate::rate_limit::RateLimitCfg,
+    /// Wallet attestation (WIA/KA, §12.1): the evaluator (PDP trust +
+    /// tier policy), `None` = attestation auth disabled (private_key_jwt
+    /// only — the conformance profile).
+    pub wallet_attestation:
+        Option<std::sync::Arc<crate::wallet_attestation::WalletAttestationEvaluator>>,
 }
 
 impl AppState {

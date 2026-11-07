@@ -142,6 +142,26 @@ pub struct AttestationCfg {
     /// Route tier authorization through the PDP instead of local rules.
     #[serde(default)]
     pub use_pdp: bool,
+    /// **Wallet attestation auth (WIA/KA)**: present ⇒ the token endpoint
+    /// accepts attestation-based client auth (`OAuth-Client-Attestation`
+    /// headers per draft-ietf-oauth-attestation-based-client-auth §3.1,
+    /// PoP required; the legacy form-body mode has no PoP), on the same
+    /// policy layer as the rules above. Absent ⇒ private_key_jwt only
+    /// (the conformance profile). The WIA's signature verifies locally
+    /// (x5c/jwk/kid+JWKS), wallet-provider trust goes to go-trust
+    /// (action `wallet_provider`), then the tier policy.
+    #[serde(default)]
+    pub wallet: Option<WalletAttestationCfg>,
+}
+
+/// `[authorization.attestation.wallet]`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WalletAttestationCfg {
+    /// The WIA trust model to accept (design §12.1, vc's Mode): "etsi"
+    /// (x5c-based), "ietf" (iss/JWKS-based), or empty = either.
+    #[serde(default)]
+    pub mode: String,
 }
 
 /// The ZK layer's deployment configuration (design §8.3): where circuit

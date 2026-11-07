@@ -25,6 +25,23 @@ pub trait TrustPdp: Send + Sync {
             "this trust decision point does not evaluate presentations; refusing",
         ))
     }
+
+    /// Wallet-provider trust (design §12.1, WIA/KA): may this
+    /// **already-verified** attestation signing key belong to a trusted
+    /// wallet provider? The third decision on the PDP boundary —
+    /// distinct from issuance (the integrating application) and
+    /// presentation (a presented credential): vc's `RoleWalletProvider`.
+    /// Fails closed by default: an implementation that does not decide
+    /// wallet providers never permits them.
+    async fn permit_wallet_provider(
+        &self,
+        _query: &siros_issuer_core::trust::WalletProviderTrustQuery,
+    ) -> Result<()> {
+        Err(Error::new(
+            code::PDP_UNAVAILABLE,
+            "this trust decision point does not evaluate wallet providers; refusing",
+        ))
+    }
 }
 
 /// No PDP configured: every decision is `pdp_unavailable`. Issuance cannot
@@ -63,6 +80,13 @@ impl TrustPdp for AuthZenPdp {
     async fn permit_presentation(
         &self,
         query: &siros_verifier_core::trust::TrustQuery,
+    ) -> Result<()> {
+        self.evaluate(&query.to_authzen()).await
+    }
+
+    async fn permit_wallet_provider(
+        &self,
+        query: &siros_issuer_core::trust::WalletProviderTrustQuery,
     ) -> Result<()> {
         self.evaluate(&query.to_authzen()).await
     }

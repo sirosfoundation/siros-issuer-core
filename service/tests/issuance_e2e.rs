@@ -311,6 +311,7 @@ async fn spawn_service_dyn(
         rulebooks: config.zk.rulebooks.clone(),
         circuit_manifest,
         rate_limit: config.rate_limit.clone(),
+        wallet_attestation: None,
     };
     let app = siros_issuer_service::api::router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2977,6 +2978,7 @@ async fn retention_sweeper_expires_purges_and_hard_deletes() {
         credential_configuration_id: "urn:eudi:pid:1".to_owned(),
         sealed: Some(vec![1, 2, 3]),
         offer_uuid: Some(format!("offer-{tag}")),
+        transaction_id_hash: None,
         pre_authorized_code_hash: Some(format!("hash-{tag}")),
         pre_authorized_code_sealed: Some(vec![4, 5, 6]),
         tx_code_hash: None,

@@ -73,6 +73,11 @@ pub struct SessionRecord {
     /// sha256 of the tx_code value (compared at /token); the descriptor
     /// shown to the user is `tx_code_spec`.
     pub tx_code_hash: Option<String>,
+    /// Deferred issuance (§7.6): the transaction id the wallet polls
+    /// `/deferred-credential` with. sha256 of it indexes the pending
+    /// transaction; the value itself rides the credential response.
+    /// Set when a session defers instead of issuing.
+    pub transaction_id_hash: Option<String>,
     /// OID4VCI tx_code descriptor (input mode/length), safe to serve.
     pub tx_code_spec: Option<siros_issuer_core::oid4vci::TxCode>,
     /// Authorization-code grant only: the PAR binding and the minted
@@ -115,6 +120,8 @@ struct Inner {
     /// Mode B: challenge handle → session (the request object's
     /// response_uri path).
     by_challenge_handle: HashMap<String, SessionId>,
+    /// Deferred issuance (§7.6): transaction-id hash → session.
+    by_transaction: HashMap<String, SessionId>,
 }
 
 impl MemoryStore {
@@ -403,6 +410,39 @@ impl MemoryStore {
         Some((record.clone(), mode_b.sealed_session))
     }
 
+    /// Deferred issuance (§7.6): arm a transaction on a `pending`
+    /// session. Single-arm.
+    pub fn set_transaction(&self, id: &SessionId, transaction_id_hash: String) -> Result<()> {
+        let mut inner = self.lock()?;
+        let record = inner
+            .records
+            .get_mut(id)
+            .ok_or_else(|| Error::invalid_input("unknown session"))?;
+        if record.state != SessionState::Pending {
+            return Err(Error::illegal_transition(
+                "a deferred transaction arms only on a pending session",
+            ));
+        }
+        if record.transaction_id_hash.is_some() {
+            return Err(Error::illegal_transition(
+                "a deferred transaction is already armed for this session",
+            ));
+        }
+        record.transaction_id_hash = Some(transaction_id_hash.clone());
+        inner.by_transaction.insert(transaction_id_hash, id.clone());
+        Ok(())
+    }
+
+    /// Deferred issuance: consume a pending transaction (single-use —
+    /// the arm is cleared under the lock; a second take misses).
+    pub fn take_transaction(&self, transaction_id_hash: &str) -> Option<SessionRecord> {
+        let mut inner = self.lock().ok()?;
+        let id = inner.by_transaction.remove(transaction_id_hash)?;
+        let record = inner.records.get_mut(&id)?;
+        record.transaction_id_hash = None;
+        Some(record.clone())
+    }
+
     /// Read-only lookup by authorization code (no consumption): Mode B's
     /// DPoP sender-constraint check runs before the single-use claim, so
     /// a wrong key refuses without burning the code.
@@ -652,6 +692,18 @@ pub trait SessionStore: Send + Sync {
     /// take). Returns the record and the sealed verifier-core session.
     async fn take_mode_b(&self, challenge_handle: &str) -> Option<(SessionRecord, Vec<u8>)>;
 
+    /// Deferred issuance (§7.6): arm a transaction on a `pending`
+    /// session — the wallet polls `/deferred-credential` with the
+    /// transaction id. Single-arm: a second arm refuses.
+    async fn set_transaction(&self, id: &SessionId, transaction_id_hash: String) -> Result<()>;
+
+    /// Deferred issuance: consume a pending transaction by its
+    /// transaction-id hash. Returns the session record iff the
+    /// transaction is pending and claimed atomically (single-use —
+    /// completion transitions `issued` exactly once); `None` when
+    /// absent or already claimed.
+    async fn take_transaction(&self, transaction_id_hash: &str) -> Option<SessionRecord>;
+
     /// The retention sweeper (design §6.3): expire, purge, hard-delete.
     /// One call, three phases, under the backend's own atomicity:
     ///
@@ -811,6 +863,14 @@ impl SessionStore for MemoryStore {
 
     async fn take_mode_b(&self, challenge_handle: &str) -> Option<(SessionRecord, Vec<u8>)> {
         MemoryStore::take_mode_b(self, challenge_handle)
+    }
+
+    async fn set_transaction(&self, id: &SessionId, transaction_id_hash: String) -> Result<()> {
+        MemoryStore::set_transaction(self, id, transaction_id_hash)
+    }
+
+    async fn take_transaction(&self, transaction_id_hash: &str) -> Option<SessionRecord> {
+        MemoryStore::take_transaction(self, transaction_id_hash)
     }
 
     async fn sweep(&self, now: i64, retention_after_final_secs: i64) -> Result<SweepReport> {
