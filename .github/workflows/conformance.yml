@@ -50,6 +50,10 @@ on:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
+      tag:
+        description: "RE-TRIGGER on a release tag (e.g. v0.1.0): check out THAT tag's source, run the suites against it, upload its verdict to that tag's release. Empty = a normal dispatch (this ref's source, nothing uploaded)."
+        required: false
+        default: ""
       conformance-ref:
         description: "The conformance repo ref to run (default: main)"
         required: false
@@ -87,7 +91,12 @@ jobs:
       # below exports it). Compose takes it as CONFORMANCE_SUITE_TAG for
       # both suite images (server + nginx).
     steps:
+      # The issuer-core source under test: the `tag` re-trigger input's
+      # tag when set, else this run's own triggering ref (the PR merge,
+      # the tag push, the dispatched branch).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Checkout the conformance repo (pinned ref)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -173,9 +182,22 @@ jobs:
   # that exported nothing).
   release-upload:
     name: The certification ZIPs, on the release (tags only)
-    if: always() && github.ref_type == 'tag'
+    # The release record: a TAG PUSH (ref_type=='tag' alone is NOT enough -
+    # a manual dispatch against a tag ref would otherwise masquerade as the
+    # release record, with an overridden harness pin), OR the explicit
+    # `tag` re-trigger (the recovery path: the named tag's verdict,
+    # rebuilt by today's workflow). always(): the verdict is the verdict -
+    # a failed run's exports ride too.
+    if: always() && ((github.event_name == 'push' && github.ref_type == 'tag') || inputs.tag != '')
     needs: conformance
     runs-on: ubuntu-24.04
+    env:
+      # The release this verdict belongs to: the re-trigger's named tag,
+      # else this run's own ref name (the pushed tag).
+      TARGET_REF: ${{ inputs.tag || github.ref_name }}
+      # gh without a checkout: the job carries no source, but gh resolves
+      # its repo from a .git directory it does not have - GH_REPO pins it.
+      GH_REPO: ${{ github.repository }}
     permissions:
       # Write ONLY here, ONLY on tags: the certification ZIPs and run
       # summaries upload to the release.
@@ -198,4 +220,4 @@ jobs:
             echo "No exported plan ZIPs or summaries"
             exit 0
           fi
-          gh release upload "${GITHUB_REF_NAME}" "${files[@]}" --clobber
+          gh release upload "${TARGET_REF}" "${files[@]}" --clobber
