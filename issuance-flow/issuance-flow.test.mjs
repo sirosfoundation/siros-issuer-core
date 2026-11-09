@@ -20,7 +20,10 @@ import {
 const windowStub = {
   HTMLElement: function HTMLElement() {},
   EventSource: undefined,
-  setTimeout,
+  // The browser has no process-exit semantics; node's loop must not be
+  // held by a stubbed page timer (the poll loop's pending wake would
+  // keep a CI runner alive past the tests). unref: the loop drains.
+  setTimeout: (fn, ms, ...args) => setTimeout(fn, ms, ...args).unref(),
   location: { assign: () => {} },
 };
 globalThis.window = windowStub;

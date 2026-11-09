@@ -61,8 +61,12 @@ jobs:
           --test pkcs11_signer --test issuance_e2e hsm_
 
   issuance-flow:
-    # The npm UX module (§10): node tests.
+    # The npm UX module (§10): node tests. A tight timeout: this job
+    # once hung to the workflow's 6-hour default (a stubbed page timer
+    # held node's loop — fixed in the test stub; the ceiling stays so
+    # any regression fails in minutes, not runner-hours).
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: issuance-flow
