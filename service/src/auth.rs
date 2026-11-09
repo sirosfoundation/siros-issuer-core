@@ -14,7 +14,11 @@ use siros_issuer_core::error::code;
 use siros_issuer_core::{Error, Result};
 
 pub struct IntegratorIdentity {
-    /// RFC 7638 thumbprint of the asserting key.
+    /// The integrator's ENTITY identity — the assertion's `iss` — what
+    /// an entity-keyed trust registry (go-trust's whitelist: URL lists
+    /// per action) matches the subject against. The KEY binding rides
+    /// `jwk` (the resource): the registry fingerprint-checks it
+    /// against the entity's registered JWKS keys.
     pub subject_id: String,
     pub client_id: String,
     /// The asserting key's public JWK, for PDP evidence (`resource.key`).
@@ -104,7 +108,14 @@ pub fn verify_bearer_assertion(
         }
     }
 
-    let subject_id = thumbprint(&jwk)?;
+    // The ENTITY identity, not the key fingerprint: go-trust's whitelist
+    // is entity-keyed (URL lists per action — subject.id matches the
+    // list), with the key binding checked via the resource's key
+    // against the entity's registered JWKS keys (fingerprint match).
+    // Proven live on gdc: subject.id = the deployment URL + resource
+    // key = its own JWKS key ⇒ Permit from the real go-trust; the
+    // fingerprint-as-subject form matched no list.
+    let subject_id = iss.to_owned();
     Ok(IntegratorIdentity {
         subject_id,
         client_id: iss.to_owned(),
