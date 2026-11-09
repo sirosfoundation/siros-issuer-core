@@ -300,15 +300,15 @@ pub fn metadata_from_catalog(
         credential_issuer: issuer_identifier(issuer_base),
         authorization_servers,
         credential_endpoint: join(paths.credential)?,
-        deferred_credential_endpoint: paths.deferred_credential.map(&join).transpose()?,
+        deferred_credential_endpoint: paths.deferred_credential.map(join).transpose()?,
         // No `batch_credential_endpoint` member: the suite's metadata
         // schema (credential_issuer_metadata-1_0.json) defines none, and
         // 1.0 Final §12.2.2 runs batch issuance ON the credential
         // endpoint (the suite's batch module POSTs there; vc's metadata
         // carries only batch_credential_issuance). The `/batch-credential`
         // route remains an unadvertised alias for wallets that prefer it.
-        nonce_endpoint: paths.nonce.map(&join).transpose()?,
-        notification_endpoint: paths.notification.map(&join).transpose()?,
+        nonce_endpoint: paths.nonce.map(join).transpose()?,
+        notification_endpoint: paths.notification.map(join).transpose()?,
         credential_response_encryption: IssuerResponseEncryption {
             alg_values_supported: vec!["ECDH-ES"],
             enc_values_supported: vec!["A128GCM"],
