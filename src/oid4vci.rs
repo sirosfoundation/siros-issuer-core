@@ -279,6 +279,14 @@ pub fn metadata_from_catalog(
     for credential in &catalog.credentials {
         let id = credential.identifier.clone();
         let auxiliary_data = auxiliary_data_plans.get(&id);
+        // A credential without an identifier has nothing to issue
+        // under — a registry document missing both vct and doctype
+        // (two such collide on the empty identifier). Skipped, not
+        // refused: the metadata documents what THIS deployment can
+        // issue; a resolve of the skipped type still fails closed.
+        if id.trim().is_empty() {
+            continue;
+        }
         match credential.format.as_str() {
             // This issuer issues exactly these two formats (design
             // §8.2); a catalog that ALSO carries other formats (a live
@@ -292,7 +300,7 @@ pub fn metadata_from_catalog(
                 // metadata documents what THIS deployment issues, and
                 // the catalog's own log surface (the service's refresh
                 // logging) reports the catalog's full contents.
-                let _ = (id, other);
+                let _ = other;
                 continue;
             }
         }
