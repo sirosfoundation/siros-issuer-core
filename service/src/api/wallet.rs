@@ -161,6 +161,28 @@ pub async fn oauth_authorization_server(
     )
 }
 
+/// `GET /.well-known/jwt-vc-issuer` (SD-JWT VC §5.3 issuer metadata):
+/// the `issuer` id and the `jwks_uri` a verifier/go-trust's whitelist
+/// resolves the issuer's keys from — the same discovery path vc's apigw
+/// serves, so an sd-jwt issuer registered by URL in a PDP whitelist is
+/// resolvable. The OID4VCI metadata serves OID4VCI discovery; this one
+/// serves SD-JWT VC key discovery — both are needed.
+pub async fn sd_jwt_vc_issuer_metadata(State(state): State<AppState>) -> (StatusCode, Json<Value>) {
+    let Ok(jwks_uri) = state.issuer_base.join("jwks") else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "configuration", "message": "issuer base URL"})),
+        );
+    };
+    (
+        StatusCode::OK,
+        Json(json!({
+            "issuer": siros_issuer_core::oid4vci::issuer_identifier(&state.issuer_base),
+            "jwks_uri": jwks_uri.as_str(),
+        })),
+    )
+}
+
 /// The issuer's public signing key(s) (ID1 §11.2.1 `jwks_uri`).
 pub async fn jwks(State(state): State<AppState>) -> (StatusCode, Json<Value>) {
     // The signer interface cannot fail on a healthy key handle; a broken

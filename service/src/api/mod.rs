@@ -273,6 +273,10 @@ pub fn router(state: AppState) -> axum::Router {
             axum::routing::get(wallet::oauth_authorization_server),
         )
         .route("/jwks", axum::routing::get(wallet::jwks))
+        .route(
+            "/.well-known/jwt-vc-issuer",
+            axum::routing::get(wallet::sd_jwt_vc_issuer_metadata),
+        )
         .route("/healthz", axum::routing::get(wallet::health))
         // Wallet-facing issuance endpoints (P1: pre-authorized grant).
         .route(
