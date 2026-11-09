@@ -15,11 +15,14 @@ name: Conformance (OIDF issuer plan)
 # conformance/suite-version — never :latest, an invisible upstream bump
 # changes the verdict without a change here).
 #
-# The release-tag publish needs CONFORMANCE_DISPATCH_TOKEN (a repo
-# secret): a fine-grained PAT with Actions:write on siros-conformance
-# alone, for the repository_dispatch that hands the reports to that
-# repo's publish workflow. Creation and rotation:
-# docs/conformance-dispatch-token.md.
+# The release-tag publish needs NO cross-repo secret: this repo's own
+# workflow uploads the certification ZIPs and the run summaries to the
+# release (github.token — no expiry, nothing to rotate), and the
+# conformance repo's publish-releases.yml PULLS them from the public
+# release assets on its daily check (or immediately, via its
+# workflow_dispatch). The earlier repository_dispatch design needed a
+# fine-grained PAT whose 90-day expiry would silently break the publish
+# each quarter — dropped for exactly that.
 #
 # No module blacklist: the issuer spec runs the plan's full module set
 # (the one structural skip is the suite's own proof-module selection
@@ -53,12 +56,13 @@ on:
         default: "main"
 
 permissions:
-  contents: read
-  # The publish (release tags only) rides a repository_dispatch to the
-  # conformance repo (its own workflow owns the gh-pages push), so this
-  # repo needs no write scope anywhere: CONFORMANCE_DISPATCH_TOKEN (a
-  # fine-grained PAT with the single dispatch permission on that repo)
-  # carries it.
+  # Read everywhere; write ONLY on the release tags (the certification
+  # ZIPs and the run summaries upload to the release). The
+  # conformance.siros.org publish is the conformance repo's own pull
+  # workflow (publish-releases.yml) reading these public assets — this
+  # repo hands nothing over, so it holds no cross-repo credential at
+  # all, and nothing here ever expires.
+  contents: ${{ github.ref_type == 'tag' && 'write' || 'read' }}
 
 concurrency:
   group: conformance-${{ github.ref }}
@@ -149,23 +153,18 @@ jobs:
             conformance-repo/playwright-report/
           if-no-files-found: warn
 
-      # The publish: RELEASE TAGS ONLY, via the conformance repo's own
-      # workflow (repository_dispatch: conformance-issuer — the same path
-      # its scheduled runs use; that repo owns the gh-pages publish, so
-      # this repo needs no write scope there). The site
-      # (conformance.siros.org) carries one report set per release tag —
-      # the release's own conformance verdict, addressable and linkable
-      # from its notes. A PR's results stay in the run's artifacts (the
-      # pull request's Checks tab), never the site: a PR is a
-      # conversation, not a release.
-      - name: Trigger the conformance repo's publish (release tags only)
+      # The release's conformance verdict, on the release: the
+      # certification-package ZIPs (the submission's exact form) plus the
+      # per-variant run summaries — github.token carries the upload, and
+      # the conformance repo's pull workflow (publish-releases.yml) reads
+      # these public assets on its daily check and publishes the set to
+      # conformance.siros.org under releases/issuer-core/<tag>/, named for
+      # the tag. No cross-repo secret, nothing to rotate.
+      - name: The certification ZIPs and run summaries, on the release
         if: github.ref_type == 'tag'
         working-directory: conformance-repo
         env:
-          GH_TOKEN: ${{ secrets.CONFORMANCE_DISPATCH_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          gh api -X POST \
-            "/repos/sirosfoundation/siros-conformance/dispatches" \
-            -f event=conformance-issuer \
-            -f 'client_payload[run-id]="${GITHUB_REF_NAME}"' \
-            -f 'client_payload[run-url]="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"'
+          ls conformance-results/*.zip conformance-results/*summary*.json 2>/dev/null || { echo "No exported plan ZIPs or summaries"; exit 0; }
+          gh release upload "${GITHUB_REF_NAME}" conformance-results/*.zip conformance-results/*summary*.json --clobber'
