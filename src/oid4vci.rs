@@ -311,9 +311,13 @@ pub fn metadata_from_catalog(
             _ => unreachable!("the format was just filtered"),
         };
         if configurations.insert(id, configuration).is_some() {
-            return Err(crate::error::Error::catalog_invalid(
-                "two catalog credentials share one configuration id",
-            ));
+            // A registry may publish the same identifier under more than
+            // one schema (eu.europa.ec.eudi.pid.1 under both the SIROS
+            // and WE BUILD schema entries); the metadata advertises ONE
+            // configuration per identifier — the first in catalog order
+            // wins, later duplicates are skipped (issuance resolves a
+            // duplicate identifier by its own rule, unchanged).
+            continue;
         }
     }
 
