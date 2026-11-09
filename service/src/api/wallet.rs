@@ -1546,7 +1546,13 @@ async fn issue_sdjwt_entry(
         decoys: 0,
         hash: siros_verifier_core::sdjwt::HashAlg::Sha256,
         holder_pub: Some(holder_jwk),
-        x5c_der: Vec::new(),
+        // The signing chain (leaf first) rides the JWS header: an
+        // x5c-resolving verifier (verifier-core's X5cLeaf — the Mode B /
+        // flow path) and an entity-keyed trust registry (go-trust's
+        // whitelist: the x5c leaf's issuer evidence) resolve the
+        // issuer's keys from it. Empty when no signing chain is
+        // configured (the StaticKey verification path).
+        x5c_der: state.cert_chain_der.clone(),
         typ: "dc+sd-jwt",
     };
     let issued = issue(state.signer.as_ref(), &spec).map_err(|e| credential_err(state, &e))?;
