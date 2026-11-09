@@ -56,13 +56,15 @@ on:
         default: "main"
 
 permissions:
-  # Read everywhere; write ONLY on the release tags (the certification
-  # ZIPs and the run summaries upload to the release). The
-  # conformance.siros.org publish is the conformance repo's own pull
-  # workflow (publish-releases.yml) reading these public assets — this
-  # repo hands nothing over, so it holds no cross-repo credential at
-  # all, and nothing here ever expires.
-  contents: ${{ github.ref_type == 'tag' && 'write' || 'read' }}
+  # Read everywhere. The release-tag write lives on ONE job below
+  # (release-upload: `permissions: contents: write`, tags only) —
+  # workflow-level permission values must be literal, so the conditional
+  # grant is a job boundary, not an expression. The conformance.siros.org
+  # publish is the conformance repo's own pull workflow
+  # (publish-releases.yml) reading these public assets — this repo hands
+  # nothing over, so it holds no cross-repo credential at all, and
+  # nothing here ever expires.
+  contents: read
 
 concurrency:
   group: conformance-${{ github.ref }}
@@ -159,12 +161,41 @@ jobs:
       # the conformance repo's pull workflow (publish-releases.yml) reads
       # these public assets on its daily check and publishes the set to
       # conformance.siros.org under releases/issuer-core/<tag>/, named for
-      # the tag. No cross-repo secret, nothing to rotate.
+      # the tag. No cross-repo secret, nothing to rotate. A dedicated JOB
+      # (below): workflow-level permission values must be literal, so the
+      # tags-only write grant is the job's own permissions block.
+
+  # The tags-only release publish: the certification ZIPs and run
+  # summaries from THIS run, on the release. github.token carries the
+  # upload (no expiry, nothing to rotate); the write grant is literal
+  # and scoped to this job alone. Runs even when the suite run failed —
+  # the verdict is the verdict (the graceful-absence guard handles a run
+  # that exported nothing).
+  release-upload:
+    name: The certification ZIPs, on the release (tags only)
+    if: always() && github.ref_type == 'tag'
+    needs: conformance
+    runs-on: ubuntu-latest
+    permissions:
+      # Write ONLY here, ONLY on tags: the certification ZIPs and run
+      # summaries upload to the release.
+      contents: write
+    steps:
+      - name: Download this run's conformance results
+        uses: actions/download-artifact@v4
+        with:
+          name: conformance-results
+          path: .
+
       - name: The certification ZIPs and run summaries, on the release
-        if: github.ref_type == 'tag'
-        working-directory: conformance-repo
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          ls conformance-results/*.zip conformance-results/*summary*.json 2>/dev/null || { echo "No exported plan ZIPs or summaries"; exit 0; }
-          gh release upload "${GITHUB_REF_NAME}" conformance-results/*.zip conformance-results/*summary*.json --clobber'
+          # The artifact's nesting is the upload's common-ancestor root;
+          # find the plan ZIPs and summary JSONs wherever they landed.
+          mapfile -t files < <(find . -type f \( -name 'conformance-report-*.zip' -o -name 'issuer-core-summary-*.json' \) || true)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No exported plan ZIPs or summaries"
+            exit 0
+          fi
+          gh release upload "${GITHUB_REF_NAME}" "${files[@]}" --clobber
