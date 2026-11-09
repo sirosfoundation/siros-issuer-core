@@ -279,15 +279,28 @@ pub fn metadata_from_catalog(
     for credential in &catalog.credentials {
         let id = credential.identifier.clone();
         let auxiliary_data = auxiliary_data_plans.get(&id);
+        match credential.format.as_str() {
+            // This issuer issues exactly these two formats (design
+            // §8.2); a catalog that ALSO carries other formats (a live
+            // registry publishes types this deployment cannot issue)
+            // advertises only what it issues — `credential_configurations_supported`
+            // is the issuer's own offer, and a resolve of the skipped
+            // type still fails closed at issuance.
+            SD_JWT_FORMAT | MDOC_FORMAT => {}
+            other => {
+                // The skip is silent-by-design at this layer: the
+                // metadata documents what THIS deployment issues, and
+                // the catalog's own log surface (the service's refresh
+                // logging) reports the catalog's full contents.
+                let _ = (id, other);
+                continue;
+            }
+        }
         let configuration = match credential.format.as_str() {
             SD_JWT_FORMAT => sd_jwt_configuration(credential, auxiliary_data),
             MDOC_FORMAT => mdoc_configuration(credential, auxiliary_data),
-            // The catalog indexes only these two formats (design §8.2).
-            other => {
-                return Err(crate::error::Error::catalog_invalid(format!(
-                    "catalog carries unsupported format {other}"
-                )))
-            }
+            // Unreachable: the match above filtered to these two.
+            _ => unreachable!("the format was just filtered"),
         };
         if configurations.insert(id, configuration).is_some() {
             return Err(crate::error::Error::catalog_invalid(
