@@ -245,10 +245,49 @@ async fn spawn_service(
     let (signer, private) = signer_pair;
     let public = siros_issuer_core::signer::Signer::public_jwk(&signer).expect("public jwk");
     let cert_chain = signer_cert_chain(&private);
-    let svc = spawn_service_dyn(pdp, allocator, Arc::new(signer), public, cert_chain, false).await;
+    let svc = spawn_service_dyn(
+        pdp,
+        allocator,
+        Arc::new(signer),
+        public,
+        cert_chain,
+        false,
+        None,
+    )
+    .await;
     TestService {
         base: svc.base,
         // The file key verifies the oracles (public material).
+        signer: siros_issuer_core::signer::JwkSigner::new(private).expect("signer"),
+    }
+}
+
+/// The §6.5 pre-auth binding surface: same spawn, the binding armed —
+/// pre-auth sessions demand a presentation before token issuance.
+async fn spawn_service_bound(
+    pdp: Arc<dyn TrustPdp>,
+    allocator: Arc<RecordingAllocator>,
+    signer_pair: (siros_issuer_core::signer::JwkSigner, jose_rs::jwk::Jwk),
+    presentation_credential: &str,
+) -> TestService {
+    let (signer, private) = signer_pair;
+    let public = siros_issuer_core::signer::Signer::public_jwk(&signer).expect("public jwk");
+    let cert_chain = signer_cert_chain(&private);
+    let binding = siros_issuer_service::config::PreAuthBindingCfg {
+        presentation_credential: presentation_credential.to_owned(),
+    };
+    let svc = spawn_service_dyn(
+        pdp,
+        allocator,
+        Arc::new(signer),
+        public,
+        cert_chain,
+        false,
+        Some(binding),
+    )
+    .await;
+    TestService {
+        base: svc.base,
         signer: siros_issuer_core::signer::JwkSigner::new(private).expect("signer"),
     }
 }
@@ -264,7 +303,16 @@ async fn spawn_service_deferred(
     let (signer, private) = signer_pair;
     let public = siros_issuer_core::signer::Signer::public_jwk(&signer).expect("public jwk");
     let cert_chain = signer_cert_chain(&private);
-    let svc = spawn_service_dyn(pdp, allocator, Arc::new(signer), public, cert_chain, true).await;
+    let svc = spawn_service_dyn(
+        pdp,
+        allocator,
+        Arc::new(signer),
+        public,
+        cert_chain,
+        true,
+        None,
+    )
+    .await;
     TestService {
         base: svc.base,
         signer: siros_issuer_core::signer::JwkSigner::new(private).expect("signer"),
@@ -282,6 +330,7 @@ async fn spawn_service_dyn(
     _public: jose_rs::jwk::Jwk,
     cert_chain_der: Vec<Vec<u8>>,
     deferred: bool,
+    binding: Option<siros_issuer_service::config::PreAuthBindingCfg>,
 ) -> SignerAgnosticService {
     // Any port: issuer_base is what signed URLs carry; bind 0 and use it.
     let issuer_base = Url::parse("http://127.0.0.1:8080").unwrap();
@@ -318,6 +367,8 @@ async fn spawn_service_dyn(
             ..Default::default()
         },
         deferred_interval_seconds: 5,
+        auxiliary_data_plans: std::collections::BTreeMap::new(),
+        zk_seeds: Default::default(),
         request_encryption_key: None,
         cert_chain_der: cert_chain_der.clone(),
         attestation: Arc::new(siros_issuer_service::client_auth::WildcardRulesPolicy::new(
@@ -334,7 +385,11 @@ async fn spawn_service_dyn(
         rulebooks: config.zk.rulebooks.clone(),
         circuit_manifest,
         rate_limit: config.rate_limit.clone(),
+        rate_counters: siros_issuer_service::rate_limit::WalletRateCounters::from_config(
+            &config.rate_limit,
+        ),
         wallet_attestation: None,
+        pre_auth_binding: binding,
     };
     let app = siros_issuer_service::api::router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3208,6 +3263,7 @@ async fn hsm_signer_serves_both_credential_formats() {
         public.clone(),
         vec![token.cert_der.clone()],
         false,
+        None,
     )
     .await;
     let client = reqwest::Client::new();
@@ -3445,6 +3501,7 @@ async fn retention_sweeper_expires_purges_and_hard_deletes() {
         offer_uuid: Some(format!("offer-{tag}")),
         transaction_id_hash: None,
         pending_holder_jwks: None,
+        identity_match_sealed: None,
         pre_authorized_code_hash: Some(format!("hash-{tag}")),
         pre_authorized_code_sealed: Some(vec![4, 5, 6]),
         tx_code_hash: None,
@@ -3552,4 +3609,458 @@ async fn retention_sweeper_expires_purges_and_hard_deletes() {
     );
     // d stays until ITS ttl lapses.
     assert!(store.get(&d_id).is_some());
+}
+
+// ─── §6.5 v2: the pre-auth grant's strong binding ──────────────────────────
+
+/// The bound pre-auth flow end-to-end: the session starts
+/// `awaiting_authorization` (the offer is served, the code is not
+/// redeemable), the wallet presents a PID through the Mode B machinery,
+/// the integrator's identity_match rule matches, and only then does the
+/// code redeem — the one state machine enforcing
+/// presentation-before-redemption, no new states.
+#[tokio::test]
+async fn pre_auth_binding_presentation_unlocks_the_code() {
+    use siros_verifier_core::sdjwt::HashAlg;
+    use siros_verifier_core::testutil::{self, IssueSpec, KbSpec, Seg};
+
+    let allocator = Arc::new(RecordingAllocator {
+        list_url: Url::parse("http://127.0.0.1:9/lists/x").unwrap(),
+        next_index: AtomicU64::new(0),
+        updates: Mutex::new(Vec::new()),
+    });
+    let service = spawn_service_bound(
+        Arc::new(PermitPdp),
+        allocator,
+        test_signer(),
+        "urn:eudi:pid:1",
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let base = Url::parse(ISSUER_BASE).unwrap();
+
+    // 1. The integrator prepares the issuance WITH the binding rule (vc:
+    //    required, not omittable — the values are what its own login
+    //    authenticated its user under).
+    let integrator = ec_key();
+    let (created, _) = create_session(
+        &service,
+        &integrator,
+        json!({
+            "credential": "urn:eudi:pid:1",
+            "subject": {"given_name": "Presented", "family_name": "Subject"},
+            "identity_match": {"claims": {
+                "given_name": {"equals": "Presented"},
+                "family_name": {"equals": "Subject"}
+            }},
+            "grant": {"tx_code": {"value": "654321"}},
+        }),
+    )
+    .await;
+    let body: Value = created.json().await.unwrap();
+    assert_eq!(
+        body["state"], "awaiting_authorization",
+        "a bound session starts awaiting the presentation"
+    );
+    let session_id = body["session_id"].as_str().unwrap().to_owned();
+    let offer_uri = body["offer_uri"].as_str().unwrap().to_owned();
+
+    // 2. The offer serves (the wallet needs the code to redeem AFTER the
+    //    presentation; withholding the offer would deadlock the flow).
+    let offer: Value = client
+        .get(format!(
+            "{}{}",
+            service.base,
+            offer_uri.trim_start_matches(ISSUER_BASE)
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let code = offer["grants"][GRANT_PRE_AUTHORIZED_CODE]["pre-authorized_code"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let code_for_replay = code.clone();
+
+    // 3. The code does NOT redeem before the presentation — the machine
+    //    is the enforcement (claim requires `offered`).
+    let refused = client
+        .post(format!("{}/token", service.base))
+        .form(&token_form(&[
+            ("grant_type", GRANT_PRE_AUTHORIZED_CODE.to_owned()),
+            ("pre_authorized_code", code.clone()),
+            ("tx_code", "654321".to_owned()),
+        ]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        refused.status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "the pre-auth code redeems only after the presentation"
+    );
+
+    // 4. The Mode B challenge machinery, driven with the session id as
+    //    issuer_state (the portal knows it; it created the session).
+    let dpop_key = ec_key();
+    let now = now_unix();
+    let jti = || {
+        siros_issuer_core::sdjwt_issue::b64u(&{
+            let mut b = [0u8; 16];
+            getrandom::fill(&mut b).expect("OS randomness");
+            b
+        })
+    };
+    let challenge_htu = base.join("authorization-challenge").unwrap();
+    let dpop_proof = sign_jwt(
+        &dpop_key,
+        "dpop+jwt",
+        &json!({ "htm": "POST", "htu": challenge_htu.as_str(), "iat": now, "jti": jti() }),
+        true,
+    );
+    let challenge_reply: Value = client
+        .post(format!("{}/authorization-challenge", service.base))
+        .header("DPoP", &dpop_proof)
+        .json(&json!({ "issuer_state": session_id }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let jar = challenge_reply["authorization_request"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the request object, reply: {challenge_reply}"))
+        .to_owned();
+    let jar_payload: Value = serde_json::from_slice(
+        &siros_issuer_core::sdjwt_issue::b64u_decode(jar.split('.').nth(1).unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        jar_payload["dcql_query"]["credentials"][0]["meta"]["vct_values"][0], "urn:eudi:pid:1",
+        "the DCQL asks for the CONFIGURED presentation credential, not the issued one"
+    );
+    let oid4vp_nonce = jar_payload["nonce"].as_str().unwrap().to_owned();
+    let oid4vp_state = jar_payload["state"].as_str().unwrap().to_owned();
+    let oid4vp_client_id = jar_payload["client_id"].as_str().unwrap().to_owned();
+    let response_uri = jar_payload["response_uri"]
+        .as_str()
+        .unwrap()
+        .replace(ISSUER_BASE, service.base.trim_end_matches('/'));
+    let enc_pub: jose_rs::jwk::Jwk =
+        serde_json::from_value(jar_payload["client_metadata"]["jwks"]["keys"][0].clone()).unwrap();
+    let enc_kid = enc_pub.kid.clone().unwrap();
+
+    // 5. The wallet presents a PID whose claims satisfy the rule.
+    let (pid_issuer_cert, pid_issuer_key) = testutil::self_signed_ec("pid-issuer.example", "ES256");
+    let holder = testutil::ec_jwk("ES256", "holder");
+    let mut spec = IssueSpec::new(json!({
+        "iss": "https://pid-issuer.example",
+        "vct": "urn:eudi:pid:1",
+        "iat": now - 10,
+        "exp": now + 100_000,
+        "given_name": "Presented",
+        "family_name": "Subject",
+        "birth_date": "1999-12-31",
+    }));
+    spec.holder_pub = Some(testutil::public_of(&holder));
+    spec.x5c_der = vec![pid_issuer_cert];
+    spec.conceal = vec![
+        vec![Seg::Key("given_name")],
+        vec![Seg::Key("family_name")],
+        vec![Seg::Key("birth_date")],
+    ];
+    let issued_pid = testutil::issue(&pid_issuer_key, &spec).unwrap();
+    let presentation = testutil::present(
+        &issued_pid,
+        &[0, 1, 2],
+        Some(KbSpec {
+            holder: &holder,
+            aud: &oid4vp_client_id,
+            nonce: &oid4vp_nonce,
+            iat: now,
+        }),
+        HashAlg::Sha256,
+    )
+    .unwrap();
+    let jwe_body = serde_json::to_vec(&json!({
+        "vp_token": { "pid": [presentation] },
+        "state": oid4vp_state,
+    }))
+    .unwrap();
+    let jwe = siros_issuer_core::response::encrypt_response(
+        &enc_pub,
+        &jwe_body,
+        Some(&enc_kid),
+        jose_rs::algorithm::JweEncryption::A128GCM,
+    )
+    .unwrap();
+    let bound: Value = client
+        .post(&response_uri)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(format!("response={}", urlencoding_encode(&jwe)))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        bound["bound"], true,
+        "the matched presentation binds the session"
+    );
+
+    // 6. Now the code redeems and the credential issues (the ordinary
+    //    pre-auth path from here — one machine).
+    let token: Value = client
+        .post(format!("{}/token", service.base))
+        .form(&token_form(&[
+            ("grant_type", GRANT_PRE_AUTHORIZED_CODE.to_owned()),
+            ("pre_authorized_code", code),
+            ("tx_code", "654321".to_owned()),
+        ]))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        token["access_token"].is_string(),
+        "the code redeems post-presentation"
+    );
+
+    // A second redemption of the SAME code is still single-use.
+    let replay = client
+        .post(format!("{}/token", service.base))
+        .form(&token_form(&[
+            ("grant_type", GRANT_PRE_AUTHORIZED_CODE.to_owned()),
+            ("pre_authorized_code", code_for_replay),
+            ("tx_code", "654321".to_owned()),
+        ]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), reqwest::StatusCode::BAD_REQUEST);
+}
+
+/// A presented credential that does NOT satisfy the rule fails the
+/// session — stable refusal, never a silent pass — and the code never
+/// redeems.
+#[tokio::test]
+async fn pre_auth_binding_mismatch_fails_the_session() {
+    use siros_verifier_core::sdjwt::HashAlg;
+    use siros_verifier_core::testutil::{self, IssueSpec, KbSpec, Seg};
+
+    let allocator = Arc::new(RecordingAllocator {
+        list_url: Url::parse("http://127.0.0.1:9/lists/x").unwrap(),
+        next_index: AtomicU64::new(0),
+        updates: Mutex::new(Vec::new()),
+    });
+    let service = spawn_service_bound(
+        Arc::new(PermitPdp),
+        allocator,
+        test_signer(),
+        "urn:eudi:pid:1",
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let base = Url::parse(ISSUER_BASE).unwrap();
+
+    let integrator = ec_key();
+    let (created, _) = create_session(
+        &service,
+        &integrator,
+        json!({
+            "credential": "urn:eudi:pid:1",
+            "subject": {"given_name": "Someone", "family_name": "Else"},
+            "identity_match": {"claims": {"family_name": {"equals": "Else"}}},
+            "grant": {"tx_code": {"value": "654321"}},
+        }),
+    )
+    .await;
+    let body: Value = created.json().await.unwrap();
+    let session_id = body["session_id"].as_str().unwrap().to_owned();
+
+    let dpop_key = ec_key();
+    let now = now_unix();
+    let jti = || {
+        siros_issuer_core::sdjwt_issue::b64u(&{
+            let mut b = [0u8; 16];
+            getrandom::fill(&mut b).expect("OS randomness");
+            b
+        })
+    };
+    let challenge_proof = sign_jwt(
+        &dpop_key,
+        "dpop+jwt",
+        &json!({
+            "htm": "POST",
+            "htu": base.join("authorization-challenge").unwrap().as_str(),
+            "iat": now,
+            "jti": jti(),
+        }),
+        true,
+    );
+    let challenge_reply: Value = client
+        .post(format!("{}/authorization-challenge", service.base))
+        .header("DPoP", &challenge_proof)
+        .json(&json!({ "issuer_state": session_id }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let jar = challenge_reply["authorization_request"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let jar_payload: Value = serde_json::from_slice(
+        &siros_issuer_core::sdjwt_issue::b64u_decode(jar.split('.').nth(1).unwrap()).unwrap(),
+    )
+    .unwrap();
+    let oid4vp_nonce = jar_payload["nonce"].as_str().unwrap().to_owned();
+    let oid4vp_state = jar_payload["state"].as_str().unwrap().to_owned();
+    let oid4vp_client_id = jar_payload["client_id"].as_str().unwrap().to_owned();
+    let response_uri = jar_payload["response_uri"]
+        .as_str()
+        .unwrap()
+        .replace(ISSUER_BASE, service.base.trim_end_matches('/'));
+    let enc_pub: jose_rs::jwk::Jwk =
+        serde_json::from_value(jar_payload["client_metadata"]["jwks"]["keys"][0].clone()).unwrap();
+    let enc_kid = enc_pub.kid.clone().unwrap();
+
+    // The wallet presents a DIFFERENT person than the rule demands.
+    let (pid_issuer_cert, pid_issuer_key) = testutil::self_signed_ec("pid-issuer.example", "ES256");
+    let holder = testutil::ec_jwk("ES256", "holder");
+    let mut spec = IssueSpec::new(json!({
+        "iss": "https://pid-issuer.example",
+        "vct": "urn:eudi:pid:1",
+        "iat": now - 10,
+        "exp": now + 100_000,
+        "given_name": "Impostor",
+        "family_name": "Person",
+    }));
+    spec.holder_pub = Some(testutil::public_of(&holder));
+    spec.x5c_der = vec![pid_issuer_cert];
+    spec.conceal = vec![vec![Seg::Key("family_name")]];
+    let issued_pid = testutil::issue(&pid_issuer_key, &spec).unwrap();
+    let presentation = testutil::present(
+        &issued_pid,
+        &[0],
+        Some(KbSpec {
+            holder: &holder,
+            aud: &oid4vp_client_id,
+            nonce: &oid4vp_nonce,
+            iat: now,
+        }),
+        HashAlg::Sha256,
+    )
+    .unwrap();
+    let jwe_body = serde_json::to_vec(&json!({
+        "vp_token": { "pid": [presentation] },
+        "state": oid4vp_state,
+    }))
+    .unwrap();
+    let jwe = siros_issuer_core::response::encrypt_response(
+        &enc_pub,
+        &jwe_body,
+        Some(&enc_kid),
+        jose_rs::algorithm::JweEncryption::A128GCM,
+    )
+    .unwrap();
+    let mismatch = client
+        .post(&response_uri)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(format!("response={}", urlencoding_encode(&jwe)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        mismatch.status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "the mismatched presentation refuses"
+    );
+
+    // The session failed: the code never redeems.
+    let session: Value = client
+        .get(format!(
+            "{}/api/v1/issuance/sessions/{}",
+            service.base, session_id
+        ))
+        .header(
+            "Authorization",
+            format!(
+                "Bearer {}",
+                client_assertion(&integrator, &Url::parse(ISSUER_BASE).unwrap())
+            ),
+        )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        session["state"], "failed",
+        "a failed match fails the session"
+    );
+}
+
+/// vc's rule discipline: an EMPTY rule is refused (a caller supplying no
+/// rule has said nothing, not "anything matches"), and an armed
+/// deployment refuses a creation without one.
+#[tokio::test]
+async fn pre_auth_binding_requires_a_nonempty_rule() {
+    let allocator = Arc::new(RecordingAllocator {
+        list_url: Url::parse("http://127.0.0.1:9/lists/x").unwrap(),
+        next_index: AtomicU64::new(0),
+        updates: Mutex::new(Vec::new()),
+    });
+    let service = spawn_service_bound(
+        Arc::new(PermitPdp),
+        allocator,
+        test_signer(),
+        "urn:eudi:pid:1",
+    )
+    .await;
+
+    let integrator = ec_key();
+    // Absent rule: refused (required, not omittable).
+    let (created, _) = create_session(
+        &service,
+        &integrator,
+        json!({
+            "credential": "urn:eudi:pid:1",
+            "subject": {"given_name": "A", "family_name": "B"},
+            "grant": {"tx_code": {"value": "654321"}},
+        }),
+    )
+    .await;
+    assert_eq!(
+        created.status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "a bound deployment refuses a creation without identity_match"
+    );
+    // Empty rule: refused (matches anything = refused).
+    let (created, _) = create_session(
+        &service,
+        &integrator,
+        json!({
+            "credential": "urn:eudi:pid:1",
+            "subject": {"given_name": "A", "family_name": "B"},
+            "identity_match": {"claims": {}},
+            "grant": {"tx_code": {"value": "654321"}},
+        }),
+    )
+    .await;
+    assert_eq!(
+        created.status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "an empty identity_match rule is refused"
+    );
 }

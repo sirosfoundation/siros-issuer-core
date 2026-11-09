@@ -231,6 +231,69 @@ async fn run(config_path: &str) -> siros_issuer_core::Result<()> {
         Arc::new(store::MemoryStore::new())
     };
 
+    // Rate counters (§11): the in-process counter serves the
+    // single-process default; a Mongo-backed deployment shares the
+    // budget across replicas (`[storage.mongodb]` ⇒ shared counters,
+    // same fail-closed contract — an unavailable counter is 503).
+    let rate_counters = {
+        #[cfg(feature = "mongo")]
+        {
+            if let Some(mongo) = &config.storage.mongodb {
+                let client = mongodb::Client::with_uri_str(&mongo.uri)
+                    .await
+                    .unwrap_or_else(|e| {
+                        eprintln!("siros-issuer-service: MongoDB connect (rate counters): {e}");
+                        std::process::exit(1);
+                    });
+                async fn build(
+                    client: &mongodb::Client,
+                    database: &str,
+                    limit: u64,
+                ) -> std::sync::Arc<dyn siros_issuer_service::rate_limit::RateCounter>
+                {
+                    std::sync::Arc::new(
+                        siros_issuer_service::mongo_rate::MongoRateCounter::connect(
+                            client, database, limit,
+                        )
+                        .await
+                        .unwrap_or_else(|e| {
+                            eprintln!("siros-issuer-service: rate counter connect: {e}");
+                            std::process::exit(1);
+                        }),
+                    )
+                }
+                let (offer, credential, token, challenge) = tokio::join!(
+                    build(&client, &mongo.database, config.rate_limit.offer_per_minute),
+                    build(
+                        &client,
+                        &mongo.database,
+                        config.rate_limit.credential_per_minute
+                    ),
+                    build(&client, &mongo.database, config.rate_limit.token_per_minute),
+                    build(
+                        &client,
+                        &mongo.database,
+                        config.rate_limit.challenge_per_minute
+                    ),
+                );
+                siros_issuer_service::rate_limit::WalletRateCounters {
+                    offer,
+                    credential,
+                    token,
+                    challenge,
+                }
+            } else {
+                siros_issuer_service::rate_limit::WalletRateCounters::from_config(
+                    &config.rate_limit,
+                )
+            }
+        }
+        #[cfg(not(feature = "mongo"))]
+        {
+            siros_issuer_service::rate_limit::WalletRateCounters::from_config(&config.rate_limit)
+        }
+    };
+
     // The attestation tier policy (design §12.1): the same layer serves
     // wallet attestation (WIA/KA) — vc's WalletAttestationPolicyEngine.
     let attestation_policy: std::sync::Arc<
@@ -263,6 +326,30 @@ async fn run(config_path: &str) -> siros_issuer_core::Result<()> {
                 ),
             )
         });
+
+    // Seed providers (§8.3 item 2): load every [zk.seeds.<name>] file —
+    // one unreadable or undersized secret refuses startup (fail-closed:
+    // a rulebook referencing it would mint commitments no verifier
+    // reproduces).
+    let zk_seeds = siros_issuer_service::zk_seeds::SeedProviders::load(&config.zk.seeds)
+        .unwrap_or_else(|e| {
+            eprintln!("siros-issuer-service: {e}");
+            std::process::exit(1);
+        });
+    // The per-configuration auxiliary-data plans (§8.3 item 3): the
+    // `auxiliary_data_supported` metadata member on rulebook-governed
+    // configurations, derived from each rulebook's plan — advertised
+    // only when `advertise_auxiliary_data` is on (the OIDF 1.0 schema
+    // branch has no such member; the conformance profile's metadata
+    // stays byte-identical with the toggle off).
+    let auxiliary_data_plans = if config.zk.advertise_auxiliary_data {
+        siros_issuer_service::api::auxiliary_data_plans(&config.zk.rulebooks).unwrap_or_else(|e| {
+            eprintln!("siros-issuer-service: {e}");
+            std::process::exit(1);
+        })
+    } else {
+        std::collections::BTreeMap::new()
+    };
 
     let state = AppState {
         catalog: Arc::new(RwLock::new(Arc::new(catalog))),
@@ -299,6 +386,9 @@ async fn run(config_path: &str) -> siros_issuer_core::Result<()> {
         access_token_ttl_seconds: config.issuance.access_token_ttl_seconds,
         c_nonce_ttl_seconds: config.issuance.c_nonce_ttl_seconds,
         rulebooks: config.zk.rulebooks.clone(),
+        pre_auth_binding: config.authorization.pre_auth_binding.clone(),
+        zk_seeds,
+        auxiliary_data_plans,
         circuit_manifest: config
             .zk
             .circuits
@@ -308,6 +398,7 @@ async fn run(config_path: &str) -> siros_issuer_core::Result<()> {
             .transpose()?
             .map(std::sync::Arc::new),
         rate_limit: config.rate_limit.clone(),
+        rate_counters,
     };
     mark_refresh_ok(&state.refresh);
 

@@ -149,11 +149,28 @@ pub async fn authorization_challenge(
         .validate(dpop_proof, "POST", &htu, now, None)
         .map_err(err)?;
 
-    // The DCQL query from the session's credential configuration.
+    // The DCQL query: the session's credential configuration — or, for a
+    // §6.5 pre-auth binding session, the **presented** credential the
+    // deployment configured (the PID), not the one being issued.
     let catalog = state.catalog_snapshot();
-    let credential =
-        siros_issuer_core::catalog::resolve(&catalog, &record.credential_configuration_id)
-            .map_err(err)?;
+    let presentation_configuration_id = match record.grant {
+        siros_issuer_core::session::GrantKind::PreAuthorized
+            if record.identity_match_sealed.is_some() =>
+        {
+            state
+                .pre_auth_binding
+                .as_ref()
+                .map(|binding| binding.presentation_credential.clone())
+                .ok_or_else(|| {
+                    err(Error::configuration(
+                        "the session is pre-auth-bound but [authorization.pre_auth_binding] is unset",
+                    ))
+                })?
+        }
+        _ => record.credential_configuration_id.clone(),
+    };
+    let credential = siros_issuer_core::catalog::resolve(&catalog, &presentation_configuration_id)
+        .map_err(err)?;
     let dcql_query = derive_dcql(credential).map_err(err)?;
 
     // The challenge handle rides the response_uri path — the wallet POSTs
@@ -287,6 +304,66 @@ pub async fn authorization_challenge_response(
             )));
         }
     };
+
+    // §6.5 v2 — the pre-auth binding branch: the presentation IS the
+    // authorization. The session's subject data is the integrator's
+    // (push model, sealed at creation — the presentation does not
+    // replace it); what the presentation proves is that the wallet
+    // holder satisfies the integrator's identity_match rule. On match:
+    // the Authorized transition unlocks the pre-authorized code claim
+    // (claim requires `offered`). On mismatch: the session fails —
+    // stable refusal, never a silent pass.
+    if record.grant == siros_issuer_core::session::GrantKind::PreAuthorized {
+        let sealed_rule = record.identity_match_sealed.clone().ok_or_else(|| {
+            err(Error::illegal_transition(
+                "the pre-authorized session carries no identity_match rule",
+            ))
+        })?;
+        let rule_value = state
+            .vault
+            .unseal(record.id.as_str(), &sealed_rule)
+            .map_err(err)?;
+        let rule: siros_issuer_core::oid4vci::IdentityMatch = serde_json::from_value(rule_value)
+            .map_err(|e| err(Error::configuration(format!("sealed identity_match: {e}"))))?;
+        // The presented claims in the credential's own shape: an mdoc
+        // presentation's claims nest under the namespace (literal-key
+        // lookup first — vc's format-aware path resolution); SD-JWT VC
+        // walks nested objects only.
+        let presentation_configuration_id = state
+            .pre_auth_binding
+            .as_ref()
+            .map(|binding| binding.presentation_credential.clone())
+            .ok_or_else(|| {
+                err(Error::configuration(
+                    "[authorization.pre_auth_binding] is unset for a bound session",
+                ))
+            })?;
+        let catalog = state.catalog_snapshot();
+        let presented_format =
+            siros_issuer_core::catalog::resolve(&catalog, &presentation_configuration_id)
+                .map_err(err)?
+                .format
+                .clone();
+        let claims_value = serde_json::Value::Object(claims.clone());
+        let matched = rule
+            .matches(&claims_value, presented_format == "mso_mdoc")
+            .map_err(err)?;
+        if !matched {
+            let _ = state.step(&record.id, SessionEvent::ErrorOccurred).await;
+            return Err(err(Error::new(
+                code::INVALID_INPUT,
+                format!(
+                    "identity match failed: the presented credential does not satisfy the rule ({})",
+                    rule.claim_paths().join(", ")
+                ),
+            )));
+        }
+        if let Err(e) = state.step(&record.id, SessionEvent::Authorized).await {
+            let _ = state.step(&record.id, SessionEvent::ErrorOccurred).await;
+            return Err(err(e));
+        }
+        return Ok((StatusCode::OK, Json(json!({ "bound": true }))));
+    }
 
     // Converge with Mode A (§7.2 steps 4–5): seal the subject, mint the
     // code, transition Authorized — the wallet exchanges at /token.

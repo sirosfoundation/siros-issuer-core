@@ -7,6 +7,7 @@
 use super::{history_json, random_handle, session_id_from_str, AppState};
 use crate::auth::{verify_bearer_assertion, IntegratorIdentity};
 use crate::status::now_unix;
+use crate::store::StateLabel as _;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -200,6 +201,42 @@ pub async fn create_session(
     let session_id = SessionId::from_random(rand16());
     let c_nonce = random_handle("n_", 16);
 
+    // §6.5 v2 — the pre-auth grant's strong binding: when the deployment
+    // arms it, the integrator MUST supply an identity_match rule (vc
+    // `PrepareIssuance`: required, not omittable — an unbound issuance
+    // is the plain pre-authorized grant, asked for by name), and the
+    // session starts `awaiting_authorization`: the wallet presents the
+    // configured credential, the rule matches, and only then does
+    // `Authorized` → `offered` unlock the code claim — the one state
+    // machine enforcing presentation-before-redemption, no new states.
+    // The rule is **subject data** (it names the person the integrator
+    // authenticated): sealed in the vault, unsealed only at the check.
+    let (binding_state, identity_match_sealed) = match &state.pre_auth_binding {
+        Some(_binding) => {
+            let rule_value = body.get("identity_match").cloned().ok_or_else(|| {
+                api_error(Error::invalid_input(
+                    "identity_match is required: this deployment binds pre-authorized issuance to a presented credential (design §6.5)",
+                ))
+            })?;
+            let rule: siros_issuer_core::oid4vci::IdentityMatch =
+                serde_json::from_value(rule_value)
+                    .map_err(|e| api_error(Error::invalid_input(format!("identity_match: {e}"))))?;
+            rule.validate().map_err(api_error)?;
+            let sealed = state
+                .vault
+                .seal(
+                    session_id.as_str(),
+                    &serde_json::to_value(&rule).expect("rule serializes"),
+                )
+                .map_err(api_error)?;
+            (
+                siros_issuer_core::session::SessionState::AwaitingAuthorization,
+                Some(sealed),
+            )
+        }
+        None => (siros_issuer_core::session::SessionState::Offered, None),
+    };
+
     let sealed = state
         .vault
         .seal(session_id.as_str(), &subject)
@@ -211,13 +248,14 @@ pub async fn create_session(
     let record = crate::store::SessionRecord {
         id: session_id.clone(),
         grant: siros_issuer_core::session::GrantKind::PreAuthorized,
-        state: siros_issuer_core::session::SessionState::Offered,
+        state: binding_state,
         owner_subject_id: identity.subject_id.clone(),
         credential_configuration_id: credential.identifier.clone(),
         sealed: Some(sealed),
         offer_uuid: Some(offer_uuid),
         transaction_id_hash: None,
         pending_holder_jwks: None,
+        identity_match_sealed,
         pre_authorized_code_hash: Some(hex_sha(&pre_authorized_code)),
         pre_authorized_code_sealed: Some(sealed_code),
         tx_code_hash,
@@ -233,7 +271,7 @@ pub async fn create_session(
         revoked: false,
         created_at_unix: now,
         expires_at_unix: now + ttl,
-        history: vec![(now, "offered".to_owned())],
+        history: vec![(now, binding_state.label().to_owned())],
     };
     state.sessions.insert(record).await.map_err(api_error)?;
 
@@ -255,7 +293,10 @@ pub async fn create_session(
         StatusCode::CREATED,
         Json(json!({
             "session_id": session_id.as_str(),
-            "state": "offered",
+            // The session's state: `awaiting_authorization` when the
+            // pre-auth binding is armed (§6.5) — the wallet must present
+            // before the code redeems.
+            "state": record.state.label(),
             "credential": credential.identifier,
             "offer_uri": offer_uri.as_str(),
             "wallet_redirect": siros_issuer_core::oid4vci::CredentialOffer::deep_link(&offer_uri).as_str(),

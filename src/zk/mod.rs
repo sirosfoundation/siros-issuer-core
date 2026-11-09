@@ -102,6 +102,15 @@ pub enum Opening {
         /// The source-claim names whose values feed the derivation, in
         /// order (part of the derivation).
         inputs: Vec<String>,
+        /// **Domain separation** (§8.3 item 2, the `SeedProvider`
+        /// derivation contract): strings that bind the opening to its
+        /// role — rulebook + credential + transform — so one secret never
+        /// serves two derivations unseparated. Rides the HKDF message
+        /// after the label, each field length-prefixed like the rest.
+        /// Empty for vc-shaped in-line openings (no separation was
+        /// configured).
+        #[serde(default)]
+        domain_info: Vec<String>,
         /// The opening length in bytes, 16 to 64.
         bytes: usize,
     },
@@ -155,6 +164,7 @@ impl Opening {
             Opening::Hkdf {
                 secret_b64url,
                 inputs,
+                domain_info,
                 bytes,
             } => {
                 if *bytes < 16 || *bytes > 64 {
@@ -177,6 +187,12 @@ impl Opening {
                 let mut message = Vec::new();
                 append_field(&mut message, Self::HKDF_LABEL);
                 append_field(&mut message, &bytes.to_string());
+                // Domain separation rides before the claim inputs: the
+                // role-binding strings, length-prefixed like every field
+                // (§8.3 item 2 — the SeedProvider derivation contract).
+                for info in domain_info {
+                    append_field(&mut message, info);
+                }
                 for input in inputs {
                     let value = claims
                         .get(input.as_str())
@@ -274,6 +290,7 @@ mod tests {
         let o1 = Opening::Hkdf {
             secret_b64url: secret.clone(),
             inputs: vec!["a".to_owned(), "b".to_owned()],
+            domain_info: Vec::new(),
             bytes: 32,
         }
         .open(&claims)
@@ -281,6 +298,7 @@ mod tests {
         let o2 = Opening::Hkdf {
             secret_b64url: secret,
             inputs: vec!["b".to_owned(), "a".to_owned()],
+            domain_info: Vec::new(),
             bytes: 32,
         }
         .open(&claims)
@@ -294,6 +312,7 @@ mod tests {
         let o3 = Opening::Hkdf {
             secret_b64url: other_secret,
             inputs: vec!["a".to_owned(), "b".to_owned()],
+            domain_info: Vec::new(),
             bytes: 32,
         }
         .open(&claims2)

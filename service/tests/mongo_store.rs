@@ -20,6 +20,7 @@ use std::sync::Arc;
 use serde_json::json;
 use siros_issuer_core::session::{SessionEvent, SessionId, SessionState as St};
 use siros_issuer_service::mongo_store::MongoStore;
+use siros_issuer_service::rate_limit::RateCounter as _;
 use siros_issuer_service::store::{
     AuthCodeBinding, ModeBState, SessionRecord, SessionStore, SweepReport,
 };
@@ -54,6 +55,7 @@ fn record(id: &SessionId, state: St, expires_at: i64) -> SessionRecord {
         tx_code_hash: None,
         transaction_id_hash: None,
         pending_holder_jwks: None,
+        identity_match_sealed: None,
         tx_code_spec: None,
         auth: None,
         auth_code_hash: None,
@@ -448,4 +450,47 @@ async fn transaction_arm_is_single_use_and_session_bound() {
     );
     // A re-take after the claim misses.
     assert!(store.take_transaction(&txn_hash, &owner).await.is_none());
+}
+
+/// The shared-replica rate counter (§11): fixed 60-second buckets keyed
+/// (endpoint, client, window) — two counter *instances* over one
+/// collection share the budget exactly, fail-closed on transport, and
+/// the window rolls on the bucket boundary.
+#[tokio::test]
+async fn rate_counter_shares_the_budget_across_instances() {
+    let Some((store, _coll)) = store("rate_counter").await else {
+        eprintln!("skipping: no mongod at {DEFAULT_URI} — the host mongod");
+        return;
+    };
+    let client = store.client();
+    let db = format!("rate_test_{}", std::process::id());
+    // Two instances = two replicas: same collection, same budget.
+    let a = siros_issuer_service::mongo_rate::MongoRateCounter::connect(client, &db, 3)
+        .await
+        .unwrap();
+    let b = siros_issuer_service::mongo_rate::MongoRateCounter::connect(client, &db, 3)
+        .await
+        .unwrap();
+    let now = 1_800_000_000i64;
+
+    // Three requests across BOTH instances: all allowed, the fourth
+    // refused by whichever instance sees it — the budget is shared.
+    assert!(a.allow("/token", "10.0.0.1", now).await.unwrap());
+    assert!(b.allow("/token", "10.0.0.1", now).await.unwrap());
+    assert!(a.allow("/token", "10.0.0.1", now).await.unwrap());
+    assert!(!b.allow("/token", "10.0.0.1", now).await.unwrap());
+
+    // A different client has its own budget.
+    assert!(a.allow("/token", "10.0.0.2", now).await.unwrap());
+    // A different endpoint has its own budget.
+    assert!(b.allow("/credential", "10.0.0.1", now).await.unwrap());
+
+    // The next window rolls the budget: the bucket start is pinned by
+    // floor(now/60); a request in the NEXT bucket starts fresh.
+    let next_window = now + 61;
+    assert!(a.allow("/token", "10.0.0.1", next_window).await.unwrap());
+
+    // One bucket's spend never leaks into another client's id.
+    assert!(b.allow("/token", "10.0.0.3", now).await.unwrap());
+    client.database(&db).drop().await.ok();
 }

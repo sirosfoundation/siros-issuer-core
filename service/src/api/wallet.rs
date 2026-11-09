@@ -118,6 +118,7 @@ pub async fn credential_issuer_metadata(
         &catalog,
         state.authorization_servers.clone(),
         &state.endpoint_paths,
+        &state.auxiliary_data_plans,
     )
     .expect("a validated issuer base URL and catalog cannot fail generation");
 
@@ -219,7 +220,15 @@ pub async fn credential_offer(
             ))
         })
         .map_err(|r: Response| r)?;
-    if record.state != siros_issuer_core::session::SessionState::Offered {
+    // §6.5 v2: a pre-auth binding session serves its offer while
+    // `awaiting_authorization` too — the wallet needs the code to redeem
+    // *after* the presentation unlocks it (the claim requires `offered`);
+    // withholding the offer would deadlock the flow. Auth-code sessions
+    // carry no offer_uuid, so this relaxation only ever reaches the
+    // pre-auth grant.
+    if record.state != siros_issuer_core::session::SessionState::Offered
+        && record.state != siros_issuer_core::session::SessionState::AwaitingAuthorization
+    {
         return Err(err(Error::illegal_transition(
             "offer is no longer redeemable",
         )));
@@ -1283,6 +1292,7 @@ async fn par_inner(
         pre_authorized_code_hash: None,
         transaction_id_hash: None,
         pending_holder_jwks: None,
+        identity_match_sealed: None,
         pre_authorized_code_sealed: None,
         tx_code_hash: None,
         tx_code_spec: None,
@@ -1602,8 +1612,8 @@ async fn issue_mdoc_entries(
                         "zk_circuit_salt_pin_disagrees_with_catalog"
                     );
                 }
-                let entries =
-                    derive_to_wallet(rulebook, &subject).map_err(|e| credential_err(state, &e))?;
+                let entries = derive_to_wallet(&state.zk_seeds, rulebook, &subject)
+                    .map_err(|e| credential_err(state, &e))?;
                 (resolution.policy, entries)
             }
             None => (SaltPolicy::DefaultSizing, Vec::new()),
@@ -1745,6 +1755,7 @@ async fn issue_mdoc_entries(
 /// (opening) rides the response, the encoded commitment rides the
 /// document at the entry's path.
 fn derive_to_wallet(
+    seeds: &crate::zk_seeds::SeedProviders,
     rulebook: &crate::config::RulebookCfg,
     subject: &serde_json::Value,
 ) -> siros_issuer_core::Result<Vec<(siros_issuer_core::zk::AuxiliaryDataEntry, String)>> {
@@ -1786,10 +1797,29 @@ fn derive_to_wallet(
             } => Opening::Hkdf {
                 secret_b64url,
                 inputs,
+                // In-line (vc-shaped) openings carry no domain
+                // separation — the fixture vocabulary.
+                domain_info: Vec::new(),
                 bytes,
             },
             crate::config::OpeningCfg::Random { bytes } => Opening::Random { bytes },
             crate::config::OpeningCfg::Claim { input } => Opening::Claim { input },
+            // A SeedProvider ref (§8.3 item 2): the named provider's
+            // held secret keys the derivation; `info` (rulebook +
+            // credential + transform) rides it with domain separation;
+            // `inputs` are the source claims as with an in-line hkdf.
+            // Unknown provider = fail-closed, never a default secret.
+            crate::config::OpeningCfg::Seed {
+                provider,
+                info,
+                inputs,
+                bytes,
+            } => Opening::Hkdf {
+                secret_b64url: seeds.secret(&provider)?.to_owned(),
+                inputs,
+                domain_info: info,
+                bytes,
+            },
         };
         let opening_bytes = opening.open(&claims)?;
         let commitment = hash_commitment(&entry.alg, &opening_bytes)?;

@@ -128,6 +128,71 @@ impl WalletRateLimits {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// The counter boundary: one budget per endpoint per client, in-process or
+// shared across replicas (§11 — vc's shared-cache counter shape; a Mongo
+// backend is the same contract)
+// ─────────────────────────────────────────────────────────────────────────
+
+/// One per-endpoint budget, in-process **or shared across replicas**.
+/// The in-process counter (wrapping [`RateLimiter`]) serves the
+/// single-process default and tests; a shared backend (the Mongo
+/// `find_one_and_update` counter, `--features mongo`) serves multi-
+/// replica deployments the same contract: count one request, answer
+/// whether the window's budget holds. **Fail-closed**: an unavailable
+/// counter is 503, never an open window (vc's semantics, preserved
+/// across the boundary).
+#[async_trait::async_trait]
+pub trait RateCounter: Send + Sync {
+    /// Count one request from `client` at `endpoint`; `true` = allowed,
+    /// `false` = the window's budget is spent (429 territory).
+    /// `now_unix` drives shared-backend window bucketing; the in-process
+    /// counter may keep its own clock.
+    async fn allow(&self, endpoint: &str, client: &str, now_unix: i64) -> Result<bool>;
+}
+
+/// The in-process counter: [`RateLimiter`] behind the trait (the
+/// single-process default; unchanged semantics).
+pub struct InProcessRateCounter {
+    limiter: RateLimiter,
+}
+
+impl InProcessRateCounter {
+    pub fn new(limiter: RateLimiter) -> Self {
+        Self { limiter }
+    }
+}
+
+#[async_trait::async_trait]
+impl RateCounter for InProcessRateCounter {
+    async fn allow(&self, endpoint: &str, client: &str, _now_unix: i64) -> Result<bool> {
+        self.limiter.allow(endpoint, client)
+    }
+}
+
+/// The wallet surface's counters (per-endpoint, trait objects: the
+/// deployment picks in-process or shared-replica per §11).
+#[derive(Clone)]
+pub struct WalletRateCounters {
+    pub offer: std::sync::Arc<dyn RateCounter>,
+    pub credential: std::sync::Arc<dyn RateCounter>,
+    pub token: std::sync::Arc<dyn RateCounter>,
+    pub challenge: std::sync::Arc<dyn RateCounter>,
+}
+
+impl WalletRateCounters {
+    /// The default: every endpoint in-process.
+    pub fn from_config(cfg: &RateLimitCfg) -> Self {
+        let limits = WalletRateLimits::from_config(cfg);
+        Self {
+            offer: std::sync::Arc::new(InProcessRateCounter::new(limits.offer)),
+            credential: std::sync::Arc::new(InProcessRateCounter::new(limits.credential)),
+            token: std::sync::Arc::new(InProcessRateCounter::new(limits.token)),
+            challenge: std::sync::Arc::new(InProcessRateCounter::new(limits.challenge)),
+        }
+    }
+}
+
 /// The client key for one request: the connecting peer's IP. The
 /// forwarded-for chain is deliberately NOT trusted here (the TLS proxy is
 /// the only hop that may set it; which proxy to trust is deployment
@@ -148,18 +213,19 @@ use axum::http::{Request, Response, StatusCode};
 use axum::middleware::Next;
 use std::sync::Arc;
 
-/// Which limiter serves one request (by path + method). The wallet
-/// surface's rate-sensitive endpoints (design §11; the metadata/JWKS/
-/// health GETs stay unlimited — cache-friendly read paths).
+/// The wallet surface's counters in middleware state (by path + method).
+/// The wallet surface's rate-sensitive endpoints (design §11; the
+/// metadata/JWKS/health GETs stay unlimited — cache-friendly read
+/// paths).
 #[derive(Clone)]
 pub struct RateLimits {
-    pub inner: Arc<WalletRateLimits>,
+    pub inner: Arc<WalletRateCounters>,
 }
 
 /// The middleware: per-endpoint, per-client budget; 429 when spent,
-/// 503 on limiter failure (fail closed — vc's semantics). The
-/// `ConnectInfo` extension supplies the remote when the server is
-/// built with it (main is).
+/// 503 on counter failure (fail closed — vc's semantics, preserved
+/// across the in-process/shared boundary). The `ConnectInfo` extension
+/// supplies the remote when the server is built with it (main is).
 pub async fn rate_limit_middleware(
     axum::extract::State(limits): axum::extract::State<RateLimits>,
     request: Request<Body>,
@@ -173,22 +239,27 @@ pub async fn rate_limit_middleware(
     // — one budget, still enforced.
     let remote = request.extensions().get::<std::net::SocketAddr>().copied();
     let client = client_key(remote.as_ref());
-    let allowed = |limiter: &RateLimiter| limiter.allow(&path, &client);
-    let result = match (method.as_str(), path.as_str()) {
-        ("GET", p) if p.starts_with("/credential-offer/") => allowed(&limits.inner.offer),
-        ("POST", "/token") => allowed(&limits.inner.token),
+    let now = crate::status::now_unix();
+    // Which counter serves this request (None = unlimited: metadata
+    // GETs, JWKS, health, the backend session API — the rate-sensitive
+    // wallet surface only).
+    let counter: Option<std::sync::Arc<dyn RateCounter>> = match (method.as_str(), path.as_str()) {
+        ("GET", p) if p.starts_with("/credential-offer/") => Some(limits.inner.offer.clone()),
+        ("POST", "/token") => Some(limits.inner.token.clone()),
         ("POST", "/credential") | ("POST", "/batch-credential") => {
-            allowed(&limits.inner.credential)
+            Some(limits.inner.credential.clone())
         }
-        ("POST", "/authorization-challenge") => allowed(&limits.inner.challenge),
+        ("POST", "/authorization-challenge") => Some(limits.inner.challenge.clone()),
         ("POST", p) if p.starts_with("/authorization-challenge/response/") => {
             // The Mode B response callback — the challenge budget
             // (a wallet answering the challenge it was given).
-            allowed(&limits.inner.challenge)
+            Some(limits.inner.challenge.clone())
         }
-        // Unlimited by default: metadata GETs, JWKS, health, the
-        // backend session API (authenticator-authenticated).
-        _ => Ok(true),
+        _ => None,
+    };
+    let result = match counter {
+        Some(counter) => counter.allow(&path, &client, now).await,
+        None => Ok(true),
     };
     match result {
         Ok(true) => next.run(request).await,

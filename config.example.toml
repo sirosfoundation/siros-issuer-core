@@ -156,3 +156,37 @@ challenge_per_minute = 20   # POST authorization-challenge (+ Mode B response)
 # [authorization.attestation.wallet]
 # # etsi (x5c) | ietf (iss/JWKS) | empty = either:
 # mode = ""
+
+# ── Pre-auth strong binding (design §6.5 v2) ──────────────────────────────
+# Present ⇒ the pre-authorized grant demands a PID presentation before
+# token issuance (vc's PrepareIssuance.identity_match semantics: the
+# integrator supplies the rule per session — required, not omittable).
+# The session starts awaiting_authorization; the presentation + match
+# fires Authorized, and only then does the code claim redeem — the one
+# state machine, no new states. Absent ⇒ the v1 pre-auth behavior
+# (the conformance profile).
+#
+# [authorization.pre_auth_binding]
+# # The credential configuration the wallet must PRESENT (the PID):
+# presentation_credential = "urn:eudi:pid:1"
+
+# ── Seed providers (design §8.3 item 2) ───────────────────────────────────
+# Rulebook openings may reference a named provider instead of an in-line
+# secret (opening = {seed = {provider = "...", info = [...], inputs =
+# [...], bytes = N}}): the secret lives in a file the deployment mounts
+# (0600 recommended; ≥32 bytes; a missing/short file refuses startup).
+# Derivation is HKDF with domain separation — `info` binds rulebook +
+# credential + transform, so one secret never serves two roles.
+#
+# [zk.seeds.nym_auth]
+# secret_path = "/etc/siros-issuer/secrets/nym_auth.secret"
+
+# Advertise `auxiliary_data_supported` (the Credential Auxiliary Data
+# extension) on rulebook-governed credential configurations — derived
+# from each rulebook's [zk.rulebooks.<name>.auxiliary_data] at startup.
+# Default false: the OIDF 1.0 metadata schema branch has no such member
+# (an extra member warns as an unknown extension), so the conformance
+# profile's metadata stays byte-identical with the toggle off.
+#
+# [zk]
+# advertise_auxiliary_data = false

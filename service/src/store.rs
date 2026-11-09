@@ -70,9 +70,6 @@ pub struct SessionRecord {
     /// wallet in the offer object (the offer URI is the bearer), dropped
     /// with the rest of the sealed data on purge/final.
     pub pre_authorized_code_sealed: Option<Vec<u8>>,
-    /// sha256 of the tx_code value (compared at /token); the descriptor
-    /// shown to the user is `tx_code_spec`.
-    pub tx_code_hash: Option<String>,
     /// Deferred issuance (§7.6): the transaction id the wallet polls
     /// `/deferred-credential` with. sha256 of it indexes the pending
     /// transaction; the value itself rides the credential response.
@@ -83,6 +80,16 @@ pub struct SessionRecord {
     /// (Final §9), so the keys the initial request proved must survive
     /// the deferral. Public key material only, never subject data.
     pub pending_holder_jwks: Option<Vec<serde_json::Value>>,
+    /// §6.5 v2 strong binding: the integrator-supplied identity-match
+    /// rule, **sealed in the vault** (it names the subject — the values
+    /// the integrator authenticated its own user under). Unsealed only at
+    /// the presentation check. Absent on plain pre-auth sessions (no
+    /// binding required) and authorization-code sessions (the code/PKCE
+    /// binding is the wallet binding).
+    pub identity_match_sealed: Option<Vec<u8>>,
+    /// sha256 of the tx_code value (compared at /token); the descriptor
+    /// shown to the user is `tx_code_spec`.
+    pub tx_code_hash: Option<String>,
     /// OID4VCI tx_code descriptor (input mode/length), safe to serve.
     pub tx_code_spec: Option<siros_issuer_core::oid4vci::TxCode>,
     /// Authorization-code grant only: the PAR binding and the minted

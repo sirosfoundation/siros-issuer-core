@@ -35,9 +35,31 @@ pub struct Config {
     pub pdp: Option<PdpCfg>,
 }
 
+/// `[authorization.pre_auth_binding]` (§6.5 v2): the pre-authorized
+/// grant's strong binding.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreAuthBindingCfg {
+    /// The credential configuration the wallet must **present** (the
+    /// PID, resolved from the catalog for the DCQL request — the
+    /// presented credential, not the one being issued).
+    pub presentation_credential: String,
+}
+
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct AuthorizationCfg {
+    /// **Pre-auth strong binding (design §6.5 v2)**: present ⇒ the
+    /// pre-authorized grant demands a presentation before token
+    /// issuance. A bound session starts `awaiting_authorization` — the
+    /// code claim requires `offered`, so the existing state machine
+    /// enforces presentation-before-redemption with no new states. The
+    /// integrator supplies the `identity_match` rule per session (vc
+    /// `PrepareIssuance`: required, not omittable — an unbound issuance
+    /// is the plain pre-authorized grant, asked for by name). Absent ⇒
+    /// the v1 pre-auth behavior (the conformance profile).
+    #[serde(default)]
+    pub pre_auth_binding: Option<PreAuthBindingCfg>,
     /// Mode A login handoff target (design §7.2). None: wallet-initiated
     /// issuance is disabled (the authorize endpoint refuses).
     pub login_url: Option<String>,
@@ -131,6 +153,19 @@ pub enum OpeningCfg {
     Claim {
         input: String,
     },
+    /// A `SeedProvider` ref (§8.3 item 2): the opening derives from a
+    /// named provider's secret — HKDF with **domain separation**: `info`
+    /// (the role-binding strings: rulebook + credential + transform)
+    /// and `inputs` (the source-claim names) both ride the derivation,
+    /// so one provider secret never serves two roles unseparated. The
+    /// in-line `hkdf`/`random` shapes remain for fixtures/dev; a
+    /// provider ref is the production path — never a secret in config.
+    Seed {
+        provider: String,
+        info: Vec<String>,
+        inputs: Vec<String>,
+        bytes: usize,
+    },
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -177,6 +212,38 @@ pub struct ZkCfg {
     /// Rulebooks (§8.3 item 5): name → bundle. nym_auth is #1.
     #[serde(default)]
     pub rulebooks: std::collections::HashMap<String, RulebookCfg>,
+    /// Advertise `auxiliary_data_supported` (the Credential Auxiliary
+    /// Data extension, §8.3 item 3) on rulebook-governed configurations,
+    /// derived from each rulebook's `[zk.rulebooks.<name>].auxiliary_data`
+    /// at startup. **Default false** — the OIDF metadata schema's 1.0
+    /// branch has no such member (an extra member warns as an unknown
+    /// extension), so the conformance profile's metadata stays
+    /// byte-identical with the toggle off; deployments with wallets that
+    /// read the extension turn it on.
+    #[serde(default)]
+    pub advertise_auxiliary_data: bool,
+    /// Seed providers (§8.3 item 2): name → provider. Rulebook openings
+    /// may reference a provider (`opening = {seed = …}`) instead of an
+    /// in-line secret — production rulebooks want secret-manager refs,
+    /// never secrets in config.
+    #[serde(default)]
+    pub seeds: std::collections::HashMap<String, SeedProviderCfg>,
+}
+
+/// One seed provider (§8.3 item 2, `SeedProvider`): generation and
+/// derivation of the secrets rulebooks need. The v1 provider is
+/// file-backed — the secret lives in a file the service reads (0600,
+/// deployment-managed: a mounted secret, not config), and every
+/// derivation is HKDF with domain separation (`info` binds rulebook +
+/// credential + purpose), so one file secret never serves two roles
+/// unseparated.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SeedProviderCfg {
+    /// The file holding the provider secret (raw bytes; 0600, deployment
+    /// managed). Loaded at startup — a missing/unreadable file is a
+    /// startup refusal, fail-closed like every other secret.
+    pub secret_path: String,
 }
 
 /// Storage configuration (design §6.4): the session store backend —

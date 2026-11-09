@@ -504,9 +504,23 @@ pub trait Resolver: Send + Sync {
   wallet has cryptographically presented a trusted credential about the subject
   (verified in-process, trusted via go-trust, §7.3). No identity_match ceremony is needed
   because the presentation *is* the binding.
-- **v2:** strong binding for the *pre-auth* grant — require a PID presentation (vc's
-  `PrepareIssuance.identity_match` semantics: required, not omittable) before token
-  issuance, via the embedded verifier-core crates or a deployed verifier receipt.
+- **v2 (IMPLEMENTED):** strong binding for the *pre-auth* grant — require a PID
+  presentation (vc's `PrepareIssuance.identity_match` semantics: required, not
+  omittable) before token issuance, via the embedded verifier-core crates.
+  `[authorization.pre_auth_binding] presentation_credential` arms it; the
+  integrator supplies the `identity_match` rule per session (a faithful port of
+  vc's `IdentityMatch`: `claims: {path: {equals}}`, every entry must pass,
+  **empty refused**, format-aware path lookup — mdoc literal namespace key
+  first, SD-JWT nested-only — exact compare, deliberately not normalized;
+  sealed in the vault, unsealed only at the check). A bound session starts
+  `awaiting_authorization`: the challenge machinery (§7.3) arms, the verified
+  presentation + match fires `Authorized` → `offered`, and only then does
+  `claim_pre_auth_code` redeem — the one state machine enforcing
+  presentation-before-redemption, no new states. A mismatch fails the session
+  (stable refusal); a mismatched or absent rule at creation refuses. Absent
+  config ⇒ the v1 pre-auth behavior (the conformance profile, unchanged).
+  3 e2e tests + 10 rule-semantics tests. This is bw-core flow #1 in
+  miniature — the business-wallet orchestration layer subsumes it later.
 
 ---
 
@@ -769,11 +783,19 @@ auxiliary-data plan with the `hkdf`/`random`/`claim` derivation vocabulary); a s
 rulebook needs no code changes unless it needs a new derivation primitive — the exit
 criterion above, met by construction. nym_auth (rulebook #1) issues end-to-end with
 vega-mc's 32-byte salt resolved from the catalog fixture and the ssc commitment/opening
-pair verified in CI. Deferred: `auxiliary_data_supported` in the issuer metadata (the
-OIDF schema branch has no room; the openings ride the response's
-`credential_metadata.auxiliary_data`), the `SeedProvider` generalization (the fixture
-seed is in-line config, production rulebooks want secret-manager refs), and `to_issuer`
-entries (wallet commitments from proofs) — all v2-line items. The storage layer is
+pair verified in CI. **DONE (v2): `SeedProvider`** — `[zk.seeds.<name>]` file-backed
+providers (≥32 bytes, fail-closed startup, 0600 recommended), the `opening = {seed = …}`
+reference shape, and **domain separation** in the derivation contract:
+`Opening::Hkdf` gains `domain_info` (info binds rulebook + credential + transform,
+length-prefixed into the HKDF message) — one secret never serves two roles
+unseparated; in-line `hkdf`/`random` shapes remain for fixtures. **DONE (v2):
+`auxiliary_data_supported`** in the issuer metadata — `advertise_auxiliary_data`
+(Default false: the OIDF 1.0 schema branch has no such member; the conformance
+profile's metadata stays byte-identical) derives the per-configuration plan from
+each rulebook's `[zk.rulebooks.<name>.auxiliary_data]` (mechanism only: type/alg/
+path/required/encoding; to_wallet never `required`, to_issuer always; fail-closed
+validation). Remaining v2-line item: `to_issuer` entries (wallet commitments from
+proofs). The storage layer is
 pluggable behind the async `SessionStore` trait (§4.3), `MemoryStore` the reference
 implementation.
 
@@ -886,7 +908,7 @@ request signing, trust and verification to the verifier.
 | Key management | Secret-manager refs; SD-JWT and mdoc keys distinct; rotation via JWKS `kid`; **signing through the signer interface (§11.1) — HSM-resident keys supported, private material never required in memory** |
 | Subject data | Sealed at rest, bounded retention, never logged, never on any GET surface |
 | Replay | Single-use pre-auth codes, single-use c_nonces, atomic session claims; atomicity via store CAS (in-memory or Mongo) |
-| Rate limiting | Per-endpoint limits on wallet surface (credential/deferred) — port vc's defaults as config |
+| Rate limiting | Per-endpoint limits on wallet surface (credential/deferred) — port vc's defaults as config. **DONE (v2): the `RateCounter` boundary** — the in-process counter (default, unchanged semantics) behind a trait; a shared-replica backend (Mongo `find_one_and_update` `$inc`, `--features mongo`, fixed 60s buckets keyed endpoint|client|window, TTL-indexed) serves multi-replica deployments the same fail-closed contract (503, never an open window) |
 | Transport | TLS terminated upstream (verifier-core convention); no plaintext issuer_url in production config (startup check) |
 
 **Threat-model notes carried over from vc's hardening:** the session API never reads

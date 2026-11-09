@@ -86,6 +86,17 @@ impl MongoSession {
 pub struct MongoStore {
     sessions: Collection<Document>,
     retention_after_final_secs: i64,
+    /// The shared client (the rate counter connects over the same
+    /// deployment MongoDB; tests reuse the handle).
+    client: mongodb::Client,
+}
+
+impl MongoStore {
+    /// The shared client handle (tests connect sibling services over
+    /// the same deployment MongoDB).
+    pub fn client(&self) -> &mongodb::Client {
+        &self.client
+    }
 }
 
 impl MongoStore {
@@ -118,6 +129,7 @@ impl MongoStore {
         let store = Self {
             sessions,
             retention_after_final_secs,
+            client,
         };
         store
             .sessions
@@ -148,12 +160,14 @@ impl MongoStore {
 
     /// Test support: a store over a configured collection.
     pub fn with_collection(
+        client: mongodb::Client,
         sessions: Collection<Document>,
         retention_after_final_secs: i64,
     ) -> Self {
         Self {
             sessions,
             retention_after_final_secs,
+            client,
         }
     }
 

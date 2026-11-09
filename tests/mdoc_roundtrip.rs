@@ -387,6 +387,7 @@ fn nym_auth_rulebook_mdoc_still_verifies() {
             "issuing_country".to_owned(),
             "personal_administrative_number".to_owned(),
         ],
+        domain_info: Vec::new(),
         bytes: 16,
     }
     .open(&source)

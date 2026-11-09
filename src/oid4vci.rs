@@ -67,6 +67,47 @@ pub struct BatchCredentialIssuance {
     pub batch_size: u32,
 }
 
+/// `auxiliary_data_supported` — the Credential Auxiliary Data extension's
+/// per-configuration member (vc `pkg/openid4vci/auxiliary_data.go`
+/// `AuxiliaryDataSupported`, OpenID4VCI 1.1's extension): the entries a
+/// governed configuration is issued with. `to_wallet` — the openings the
+/// issuer derives and returns with each response; `to_issuer` — the
+/// commitments the wallet sends in key proofs. Advertised ONLY on
+/// rulebook-governed configurations (the plan is config data — design
+/// §8.3 item 3); ungoverned configurations omit the member, so the
+/// conformance profile's metadata is unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuxiliaryDataSupported {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub to_wallet: Vec<AuxiliaryDataWireEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub to_issuer: Vec<AuxiliaryDataWireEntry>,
+}
+
+/// One advertised auxiliary-data entry (vc `AuxiliaryDataEntry`). In
+/// **metadata** an entry describes the mechanism — no opening or
+/// commitment values ride it (those ride responses and proofs).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuxiliaryDataWireEntry {
+    /// `hash_commitment` — the one Auxiliary Data Type the extension
+    /// defines.
+    #[serde(rename = "type")]
+    pub entry_type: String,
+    /// sha-256 — the one hash_commitment alg the extension defines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alg: Option<String>,
+    /// The claims-path pointer of the claim that holds the commitment.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path: Vec<String>,
+    /// to_issuer only: the wallet MUST send this entry.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub required: bool,
+    /// How the claim at `path` represents the commitment: base64url,
+    /// base64, hex text, or the raw bytes when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct CredentialConfiguration {
@@ -91,6 +132,13 @@ pub struct CredentialConfiguration {
     pub proof_types_supported: BTreeMap<&'static str, ProofType>,
     /// sd-jwt: JWS names; mdoc: COSE integer ids (-7 = ES256).
     pub credential_signing_alg_values_supported: serde_json::Value,
+    /// The Credential Auxiliary Data extension's per-configuration plan
+    /// (§8.3 item 3): present only on rulebook-governed configurations —
+    /// the service derives it from `[zk.rulebooks.<name>].auxiliary_data`
+    /// at startup. Absent on ungoverned configurations (the conformance
+    /// profile's metadata is unchanged).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auxiliary_data_supported: Option<AuxiliaryDataSupported>,
 }
 
 /// Final §12.2.4 proof type entry: proof_signing_alg_values_supported is
@@ -194,11 +242,18 @@ impl Default for EndpointPaths {
 /// Generate the credential-issuer metadata document from the working
 /// catalog. Empty catalogs produce empty `credential_configurations_supported`
 /// — the host decides whether to serve that (readiness concern).
+///
+/// `auxiliary_data_plans`: the per-configuration
+/// Credential-Auxiliary-Data plans (§8.3 item 3) — the service derives
+/// them from its rulebook config at startup; an empty map means no
+/// configuration advertises `auxiliary_data_supported` (the conformance
+/// profile).
 pub fn metadata_from_catalog(
     issuer_base: &Url,
     catalog: &Catalog,
     authorization_servers: Vec<Url>,
     paths: &EndpointPaths,
+    auxiliary_data_plans: &BTreeMap<String, AuxiliaryDataSupported>,
 ) -> Result<CredentialIssuerMetadata> {
     let credential_request_encryption = paths.request_encryption_jwk.as_ref().map(|jwk| {
         // Publish the PUBLIC members only: `d` never leaves the
@@ -223,9 +278,10 @@ pub fn metadata_from_catalog(
     let mut configurations = BTreeMap::new();
     for credential in &catalog.credentials {
         let id = credential.identifier.clone();
+        let auxiliary_data = auxiliary_data_plans.get(&id);
         let configuration = match credential.format.as_str() {
-            SD_JWT_FORMAT => sd_jwt_configuration(credential),
-            MDOC_FORMAT => mdoc_configuration(credential),
+            SD_JWT_FORMAT => sd_jwt_configuration(credential, auxiliary_data),
+            MDOC_FORMAT => mdoc_configuration(credential, auxiliary_data),
             // The catalog indexes only these two formats (design §8.2).
             other => {
                 return Err(crate::error::Error::catalog_invalid(format!(
@@ -266,7 +322,10 @@ pub fn metadata_from_catalog(
     })
 }
 
-fn sd_jwt_configuration(credential: &CredentialType) -> CredentialConfiguration {
+fn sd_jwt_configuration(
+    credential: &CredentialType,
+    auxiliary_data: Option<&AuxiliaryDataSupported>,
+) -> CredentialConfiguration {
     CredentialConfiguration {
         format: SD_JWT_FORMAT,
         vct: Some(credential.identifier.clone()),
@@ -294,10 +353,14 @@ fn sd_jwt_configuration(credential: &CredentialType) -> CredentialConfiguration 
             },
         )]),
         credential_signing_alg_values_supported: serde_json::json!(["ES256"]),
+        auxiliary_data_supported: auxiliary_data.cloned(),
     }
 }
 
-fn mdoc_configuration(credential: &CredentialType) -> CredentialConfiguration {
+fn mdoc_configuration(
+    credential: &CredentialType,
+    auxiliary_data: Option<&AuxiliaryDataSupported>,
+) -> CredentialConfiguration {
     CredentialConfiguration {
         format: MDOC_FORMAT,
         vct: None,
@@ -323,6 +386,7 @@ fn mdoc_configuration(credential: &CredentialType) -> CredentialConfiguration {
         )]),
         // mdoc signs with COSE algorithm ids: -7 = ES256.
         credential_signing_alg_values_supported: serde_json::json!([-7]),
+        auxiliary_data_supported: auxiliary_data.cloned(),
     }
 }
 
@@ -616,6 +680,135 @@ pub struct NotificationRequest {
 pub const NOTIFICATION_ACCEPTED: &str = "credential_accepted";
 pub const NOTIFICATION_FAILURE: &str = "credential_failure";
 pub const NOTIFICATION_DELETED: &str = "credential_deleted";
+
+// ─── Identity match (design §6.5 v2, vc `pkg/openid4vci/identity_match.go`) ─
+
+/// `IdentityMatch` decides whether the Holder who presented a credential is
+/// the one an issuance was prepared for — the pre-auth grant's strong
+/// binding (design §6.5 v2). A faithful port of vc's semantics:
+///
+/// Supplied by the CALLER that prepared the issuance (the backend session
+/// API), never read from configuration: only that caller knows what "the
+/// same user" means for its own session. Every entry must pass; an **empty
+/// rule is refused** rather than treated as "anything matches" — a caller
+/// that supplies no rule has not said the issuance is unbound, it has said
+/// nothing, and the difference is the whole point of the mechanism.
+/// Omission is not the way to ask for an unbound issuance either: binding
+/// deployments refuse a creation without one (vc `PrepareIssuance`:
+/// required, not omittable). An offer any wallet may complete is the
+/// plain pre-authorized grant, asked for by name.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityMatch {
+    /// A claim path on the presented credential → the test it must pass.
+    /// The path is interpreted the way the presented credential's format
+    /// interprets it: nested for SD-JWT VC, one literal namespace-qualified
+    /// key for mdoc.
+    pub claims: std::collections::BTreeMap<String, ClaimTest>,
+}
+
+/// How one claim is compared. An object rather than a bare value so a
+/// comparison added later does not change the shape of a request a caller
+/// already sends (vc `ClaimTest`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClaimTest {
+    /// The exact value the claim must have. Where the claim is an array,
+    /// at least one element must equal it. Exact, deliberately not
+    /// case-folded or normalised: folding a personal name is
+    /// locale-dependent and gets it wrong for someone (vc's rationale).
+    pub equals: String,
+}
+
+impl IdentityMatch {
+    /// Refuse a rule that cannot do its job — at acceptance, not at
+    /// evaluation (vc `Validate`): a caller that mistypes is told while it
+    /// prepares the issuance, not when a Holder is standing there with a
+    /// wallet open.
+    pub fn validate(&self) -> Result<()> {
+        if self.claims.is_empty() {
+            return Err(crate::error::Error::invalid_input(
+                "identity match: no claims to match on; a rule that matches anything is refused — an issuance any wallet may complete is the plain pre-authorized grant, which is a different request",
+            ));
+        }
+        for (path, test) in &self.claims {
+            if path.trim().is_empty() {
+                return Err(crate::error::Error::invalid_input(
+                    "identity match: a claim path is empty",
+                ));
+            }
+            if test.equals.is_empty() {
+                return Err(crate::error::Error::invalid_input(format!(
+                    "identity match: claim {path:?} has no comparison; the only one supported is \"equals\", and it may not be empty"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// The paths this rule tests, in a stable order (sorted — a log line
+    /// or error naming them reads the same way twice; vc `ClaimPaths`).
+    pub fn claim_paths(&self) -> Vec<&str> {
+        self.claims.keys().map(String::as_str).collect()
+    }
+
+    /// Evaluate the rule against a presented credential's verified claims
+    /// (vc `matchPresentedIdentity` + `lookupClaimPath`, ported): every
+    /// entry must pass; an absent claim is a mismatch, never a skip. The
+    /// path lookup is format-aware — `is_mdoc` tries the literal
+    /// namespace-qualified key first (a flat `"org.iso.18013.5.1"`
+    /// entry), and SD-JWT walks nested objects only, so a flat dotted key
+    /// cannot satisfy a nested requirement.
+    pub fn matches(&self, claims: &serde_json::Value, is_mdoc: bool) -> Result<bool> {
+        for (path, test) in &self.claims {
+            let Some(value) = lookup_claim_path(claims, path, is_mdoc) else {
+                return Ok(false);
+            };
+            if !claim_value_matches(&value, &test.equals) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+}
+
+/// Resolve a claim path against a claims object, format-aware (vc
+/// `lookupClaimPath`): mdoc tries the literal key first; a path without a
+/// dot is a direct lookup; otherwise the segments walk nested objects.
+/// Missing or non-object intermediates resolve to nothing.
+fn lookup_claim_path(
+    claims: &serde_json::Value,
+    path: &str,
+    is_mdoc: bool,
+) -> Option<serde_json::Value> {
+    if is_mdoc {
+        if let Some(value) = claims.get(path) {
+            return Some(value.clone());
+        }
+    }
+    if !path.contains('.') {
+        return claims.get(path).cloned();
+    }
+    let mut cursor = claims;
+    for segment in path.split('.') {
+        cursor = cursor.get(segment)?;
+    }
+    Some(cursor.clone())
+}
+
+/// Does the presented value satisfy `equals` (vc `claimValueMatches`)? A
+/// bare string compares exactly; an array matches when at least one
+/// element equals it. Other shapes (numbers, objects) do not match a
+/// string rule — compare as strings when the value is one.
+fn claim_value_matches(value: &serde_json::Value, equals: &str) -> bool {
+    match value {
+        serde_json::Value::String(s) => s == equals,
+        serde_json::Value::Array(elements) => elements
+            .iter()
+            .any(|element| element.as_str() == Some(equals)),
+        _ => false,
+    }
+}
 
 // ─── PAR and the authorization-code grant (ID1 §4.2.2; design §7.2) ───────
 

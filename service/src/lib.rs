@@ -9,6 +9,8 @@ pub mod config;
 pub mod dpop;
 pub mod fetch;
 #[cfg(feature = "mongo")]
+pub mod mongo_rate;
+#[cfg(feature = "mongo")]
 pub mod mongo_store;
 pub mod pdp;
 pub mod pkcs11;
@@ -18,3 +20,4 @@ pub mod store;
 pub mod vault;
 pub mod wallet_attestation;
 pub mod zk_load;
+pub mod zk_seeds;

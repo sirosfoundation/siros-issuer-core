@@ -52,8 +52,14 @@ fn issuer_base() -> Url {
 fn catalog_drives_metadata_and_configuration_ids() {
     let (_, documents) = fixtures();
     let catalog = build_catalog(documents).unwrap();
-    let metadata =
-        metadata_from_catalog(&issuer_base(), &catalog, vec![], &EndpointPaths::default()).unwrap();
+    let metadata = metadata_from_catalog(
+        &issuer_base(),
+        &catalog,
+        vec![],
+        &EndpointPaths::default(),
+        &std::collections::BTreeMap::new(),
+    )
+    .unwrap();
 
     let sdjwt = metadata
         .credential_configurations_supported
@@ -116,8 +122,14 @@ fn catalog_drives_metadata_and_configuration_ids() {
 fn proof_types_follow_the_format() {
     let (_, documents) = fixtures();
     let catalog = build_catalog(documents).unwrap();
-    let metadata =
-        metadata_from_catalog(&issuer_base(), &catalog, vec![], &EndpointPaths::default()).unwrap();
+    let metadata = metadata_from_catalog(
+        &issuer_base(),
+        &catalog,
+        vec![],
+        &EndpointPaths::default(),
+        &std::collections::BTreeMap::new(),
+    )
+    .unwrap();
 
     let sdjwt = &metadata.credential_configurations_supported["urn:eudi:pid:1"];
     assert!(sdjwt.proof_types_supported.contains_key("jwt"));
@@ -200,8 +212,14 @@ fn resolution_is_unambiguous_or_refused() {
 fn session_api_identifiers_match_configuration_ids() {
     let (_, documents) = fixtures();
     let catalog = build_catalog(documents).unwrap();
-    let metadata =
-        metadata_from_catalog(&issuer_base(), &catalog, vec![], &EndpointPaths::default()).unwrap();
+    let metadata = metadata_from_catalog(
+        &issuer_base(),
+        &catalog,
+        vec![],
+        &EndpointPaths::default(),
+        &std::collections::BTreeMap::new(),
+    )
+    .unwrap();
     for configuration_id in metadata.credential_configurations_supported.keys() {
         let credential = resolve(&catalog, configuration_id)
             .expect("every advertised configuration id resolves");
@@ -223,7 +241,14 @@ fn credential_request_encryption_carries_only_final_schema_members() {
         })),
         ..Default::default()
     };
-    let metadata = metadata_from_catalog(&issuer_base(), &catalog, vec![], &paths).unwrap();
+    let metadata = metadata_from_catalog(
+        &issuer_base(),
+        &catalog,
+        vec![],
+        &paths,
+        &std::collections::BTreeMap::new(),
+    )
+    .unwrap();
     let cre = metadata.credential_request_encryption.expect("declared");
     let wire = serde_json::to_value(&cre).unwrap();
     let object = wire.as_object().expect("an object");

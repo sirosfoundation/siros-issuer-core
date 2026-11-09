@@ -36,6 +36,82 @@ pub struct SessionEventMessage {
     pub unix: i64,
 }
 
+/// Derive the per-configuration `auxiliary_data_supported` plans (§8.3
+/// item 3) from the rulebook config — the metadata member of the
+/// Credential Auxiliary Data extension (vc
+/// `pkg/openid4vci/auxiliary_data.go` `AuxiliaryDataSupported`).
+///
+/// In **metadata** an entry describes the mechanism only — no opening or
+/// commitment values (those ride responses and key proofs): `type`,
+/// `alg`, `path`, `required` (to_issuer), `encoding`. Validation is
+/// fail-closed at startup: an unknown alg/encoding or an empty path
+/// refuses rather than advertising a plan no wallet can satisfy.
+pub fn auxiliary_data_plans(
+    rulebooks: &std::collections::HashMap<String, crate::config::RulebookCfg>,
+) -> siros_issuer_core::Result<
+    std::collections::BTreeMap<String, siros_issuer_core::oid4vci::AuxiliaryDataSupported>,
+> {
+    use siros_issuer_core::oid4vci::{AuxiliaryDataSupported, AuxiliaryDataWireEntry};
+
+    let to_wire = |entries: &[crate::config::AuxiliaryEntryCfg],
+                   required: bool|
+     -> siros_issuer_core::Result<Vec<AuxiliaryDataWireEntry>> {
+        let mut out = Vec::new();
+        for entry in entries {
+            if entry.alg != "sha-256" {
+                return Err(siros_issuer_core::Error::configuration(format!(
+                    "auxiliary_data_supported: alg {:?} is not sha-256 (the one hash_commitment alg the extension defines)",
+                    entry.alg
+                )));
+            }
+            if entry.path.is_empty() {
+                return Err(siros_issuer_core::Error::configuration(
+                    "auxiliary_data_supported: an entry carries no path",
+                ));
+            }
+            if let Some(encoding) = &entry.encoding {
+                if !matches!(encoding.as_str(), "base64url" | "base64" | "hex") {
+                    return Err(siros_issuer_core::Error::configuration(format!(
+                        "auxiliary_data_supported: encoding {encoding:?} is none of base64url, base64, hex"
+                    )));
+                }
+            }
+            out.push(AuxiliaryDataWireEntry {
+                entry_type: "hash_commitment".to_owned(),
+                alg: Some(entry.alg.clone()),
+                path: entry.path.clone(),
+                // to_issuer entries in metadata are required unless the
+                // plan says otherwise; to_wallet entries never are.
+                required,
+                encoding: entry.encoding.clone(),
+            });
+        }
+        Ok(out)
+    };
+
+    let mut plans = std::collections::BTreeMap::new();
+    for (name, rulebook) in rulebooks {
+        let plan = AuxiliaryDataSupported {
+            to_wallet: to_wire(&rulebook.auxiliary_data.to_wallet, false)?,
+            to_issuer: to_wire(&rulebook.auxiliary_data.to_issuer, true)?,
+        };
+        // A rulebook may govern several credentials — each carries the
+        // same plan; ambiguity between rulebooks over one credential is
+        // already a startup refusal elsewhere (rulebook validation).
+        for credential in &rulebook.credentials {
+            if plans.insert(credential.clone(), plan.clone()).is_some() {
+                return Err(siros_issuer_core::Error::configuration(format!(
+                    "auxiliary_data_supported: two rulebooks govern credential {credential:?} ({name:?} among them)"
+                )));
+            }
+        }
+    }
+    Ok(plans)
+}
+
+/// The application state shared by every handler: the working catalog
+/// snapshot, the session store, the signer effect interface, the PDP —
+/// every boundary the handlers consume (design §4.3, §11).
 #[derive(Clone)]
 pub struct AppState {
     /// Current working catalog snapshot. Readers clone the Arc; the
@@ -67,6 +143,12 @@ pub struct AppState {
     /// Deferred issuance (design §7.6, Final §9): the `interval` guidance
     /// (seconds) emitted with the pending response's `transaction_id`.
     pub deferred_interval_seconds: u64,
+    /// The per-configuration Credential-Auxiliary-Data plans (§8.3 item 3),
+    /// derived from `[zk.rulebooks.<name>].auxiliary_data` at startup:
+    /// `auxiliary_data_supported` is advertised on governed
+    /// configurations only. Empty = none (the conformance profile).
+    pub auxiliary_data_plans:
+        std::collections::BTreeMap<String, siros_issuer_core::oid4vci::AuxiliaryDataSupported>,
     /// The request-encryption key (private material, in-memory only) for
     /// decrypting wallet requests sent as application/jwt.
     pub request_encryption_key: Option<jose_rs::jwk::Jwk>,
@@ -87,12 +169,25 @@ pub struct AppState {
     /// issuance resolves the one bundle governing the session's
     /// credential (startup validation guarantees uniqueness).
     pub rulebooks: std::collections::HashMap<String, crate::config::RulebookCfg>,
+    /// §6.5 v2: the pre-auth strong binding config. Present ⇒ pre-auth
+    /// sessions demand a presentation (the configured credential) before
+    /// token issuance; the session starts `awaiting_authorization`.
+    pub pre_auth_binding: Option<crate::config::PreAuthBindingCfg>,
+    /// Seed providers (§8.3 item 2): name → secret (base64url), loaded
+    /// from `[zk.seeds.<name>]` files at startup. Rulebook openings
+    /// reference a provider by name (`opening = {seed = …}`); an
+    /// unknown name is a fail-closed issuance refusal, never a default.
+    pub zk_seeds: crate::zk_seeds::SeedProviders,
     /// The circuit catalog (§8.3 item 1): zk issuance parameters by
     /// system+doctype. `None` = no source configured (a pinned rulebook
     /// stands in; unpinned zk_systems refuse).
     pub circuit_manifest: Option<std::sync::Arc<siros_issuer_core::zk::circuit::CircuitManifest>>,
     /// Wallet-surface rate limiting (§11): vc defaults unless configured.
     pub rate_limit: crate::rate_limit::RateLimitCfg,
+    /// The per-endpoint rate counters (§11): in-process by default, a
+    /// shared backend (Mongo, `--features mongo`) for multi-replica
+    /// deployments — same contract, fail-closed either way.
+    pub rate_counters: crate::rate_limit::WalletRateCounters,
     /// Wallet attestation (WIA/KA, §12.1): the evaluator (PDP trust +
     /// tier policy), `None` = attestation auth disabled (private_key_jwt
     /// only — the conformance profile).
@@ -160,9 +255,7 @@ impl AppState {
 
 pub fn router(state: AppState) -> axum::Router {
     let limits = crate::rate_limit::RateLimits {
-        inner: std::sync::Arc::new(crate::rate_limit::WalletRateLimits::from_config(
-            &state.rate_limit,
-        )),
+        inner: std::sync::Arc::new(state.rate_counters.clone()),
     };
     axum::Router::new()
         // Both spellings, for wallet compatibility (vc registers the
