@@ -1,10 +1,19 @@
-# siros-bw-core — Design Document (DRAFT v0.2 — for iteration)
+# siros-flow-core — Design Document (DRAFT v0.3 — for iteration)
 
 Status: **draft for discussion.** Nothing here is settled until the open
 questions (§14) are worked through. Modeled on the issuer-core design doc;
 §-numbers are this document's own.
 
-Revision 0.2 (2026-11-09) is a review pass over v0.1. Corrections whose
+Revision 0.3 (2026-11-09) applies the owner's decisions on the v0.2
+review notes: **the name is `siros-flow-core`** (a business wallet is one
+deployment); **comparisons are plugin-only except where they are 100%
+unequivocal** (key comparison is the one built-in, §8.2); **holding
+belongs in `siros-wallet-core`**, with a new PKCS#11-backed
+`siros-wallet-headless` providing the WMP-facing headless holder and
+`siros-wscd-manager` growing the PKCS#11 plugin for direct HSM binding
+(§7). The old Go CLI attempt (`go-siros-cli`) is archived.
+
+Revision 0.2 (2026-11-09) was a review pass over v0.1. Corrections whose
 source is checkable (ADR 002, the WE BUILD PoA schema, the WMP spec,
 verifier-core's API) are applied in the text. Points that need the
 owner's decision are left as **Review note** callouts rather than decided
@@ -15,20 +24,20 @@ surrounding text is the proposed answer.
 
 ## 1. Summary
 
-bw-core is the **business-wallet orchestration layer**: a component that
+flow-core is the **flow orchestration layer** (a business wallet is one deployment of it): a component that
 runs configurable business logic — flows that involve **authentication,
 verification, and issuance** — over a set of primitives, embedding
 `siros-issuer-core` and `siros-verifier-core` as libraries.
 
 The term "business wallet" (WE BUILD usage) covers the combined features
 of an issuer, a wallet, and a verifier, **plus an orchestration layer** on
-top of the three. bw-core is that orchestration layer. A business wallet
+top of the three. flow-core is that orchestration layer. A business wallet
 also groups multiple wallet instances via WMP; WMP is the carrier for
-that instance orchestration and one of bw-core's wallet-facing carriers
+that instance orchestration and one of flow-core's wallet-facing carriers
 (§7) — the employee's personal PID wallet is reached over OpenID4VP /
 OpenID4VCI deep links or the DC API, never WMP.
 
-What bw-core is **not**:
+What flow-core is **not**:
 
 - not a general workflow engine — the flow language is deliberately
   **non-Turing-complete** (§5);
@@ -37,7 +46,7 @@ What bw-core is **not**:
 - not a trust decision point — all trust is go-trust's (§9);
 - not a place where subject data transits in plaintext (§10);
 - not a derivation point for pseudonyms or any subject identifier — the
-  wallet derives, bw-core compares (§8).
+  wallet derives, flow-core compares (§8).
 
 ---
 
@@ -66,24 +75,24 @@ across roles, with data movement between the steps:
 Each of these is a *sequence*: request presentation(s) → verify →
 cross-check → derive subject data → issue → notify. Sequencing is policy,
 not protocol: it belongs in **configuration**, over **primitives**, with
-the cryptography in libraries. That is bw-core.
+the cryptography in libraries. That is flow-core.
 
 ### 2.2 Precedents inside the family
 
 - issuer-core's **Mode B** already embeds verifier-core in-process for a
   presentation-then-issue sequence — but hardcoded to exactly one shape
-  (present PID → bind session → mint code). bw-core generalizes the
+  (present PID → bind session → mint code). flow-core generalizes the
   *composition*, not the cryptography.
 - The **ZK rulebook layer** (issuer-core §8.3) already answers "configure
   behavior with minimal code changes" for derivations: rulebooks are
-  TOML data over a derivation vocabulary. bw-core applies the same
+  TOML data over a derivation vocabulary. flow-core applies the same
   discipline to *flows*: flow definitions are data over a step
   vocabulary (§5–6).
 - **pyFF/goFF** answer it for pipelines: a linear sequence of
   closed-vocabulary actions over a working set, with bounded `fork`/`map`
   sub-pipelines, labels, and `end` — fifteen years of federation-ops
   proof that a *small, closed* action vocabulary beats an embedded
-  scripting language. bw-core's flow language is that shape (§5).
+  scripting language. flow-core's flow language is that shape (§5).
 
 ### 2.3 WE BUILD context
 
@@ -98,10 +107,10 @@ plus orchestration). The architecture ADRs relevant here:
   nonce a stable pseudonym unique to the identity *and* the relying
   party; the derivation mechanism and its lifecycle are "defined
   separately"; name/date-of-birth matching is explicitly rejected as
-  probabilistic. Two consequences shape §8: bw-core's checks are exact
+  probabilistic. Two consequences shape §8: flow-core's checks are exact
   math, never heuristics; and the nonce is a wallet-side value, so
-  bw-core **never derives** a pseudonym from presented claims — an RP
-  holding the nonce could compute every other RP's pseudonym. bw-core
+  flow-core **never derives** a pseudonym from presented claims — an RP
+  holding the nonce could compute every other RP's pseudonym. flow-core
   compares a pseudonym the wallet presents.
 - The BU/PA rulebooks (attestation-rulebooks-catalog) are the source of
   the concrete credential definitions flows will reference.
@@ -139,10 +148,10 @@ plus orchestration). The architecture ADRs relevant here:
   flow-definition time. If a flow needs real computation, it needs a
   plugin (which is code, reviewed as code).
 - **No second protocol implementations.** OID4VCI, OID4VP, DCQL, COSE,
-  status lists: library calls. bw-core never re-does JOSE.
-- **No trust logic.** The PDP owns every allow/refuse (§9); bw-core
+  status lists: library calls. flow-core never re-does JOSE.
+- **No trust logic.** The PDP owns every allow/refuse (§9); flow-core
   constructs the evidence.
-- **No UI.** The business wallet frontend is a separate concern; bw-core
+- **No UI.** The business wallet frontend is a separate concern; flow-core
   exposes the same SSE/event surface shape issuer-core does (§8.6), and
   carrier messages.
 
@@ -164,7 +173,7 @@ plus orchestration). The architecture ADRs relevant here:
 
 ```
                    ┌─────────────────────────────────────────┐
-                   │                bw-core                   │
+                   │                flow-core                   │
                    │                                         │
  business wallet ──┤  flow language  ──▶ flow engine ──┐      │
  frontend (SSE)    │  (definitions)     (interpreter) │      │
@@ -199,11 +208,11 @@ plus orchestration). The architecture ADRs relevant here:
 
 ### 4.2 Repository layout (proposed)
 
-New repo `sirosfoundation/siros-bw-core`:
+New repo `sirosfoundation/siros-flow-core`:
 
 ```
-siros-bw-core/
-├── docs/siros-bw-core-design.md     # this document
+siros-flow-core/
+├── docs/siros-flow-core-design.md     # this document
 ├── src/                             # sans-I/O flow core
 │   ├── lib.rs
 │   ├── language.rs                  # definition parsing + validation
@@ -302,9 +311,14 @@ steps:
 > PID sharing a holder key is the exception, not the strongest check.
 > The honest binding against today's credential is a name comparison,
 > which is what ADR 002 rejects and which needs the string composition
-> §5.4 forbids. Decision needed (§14 Q11): (a) ask the PoA rulebook to
-> carry the representative's PID `id` or RP-scoped pseudonym; or (b)
-> accept a pilot-only `rule-match`-on-names plugin, labelled as such.
+> §5.4 forbids. **RESOLVED (owner, 2026-11-09, §14 Q11):** (b) is the
+> general mechanism — a `rule-match`-on-names **reference plugin**,
+> labelled as probabilistic identity evidence (comparisons are
+> plugin-only except where 100% unequivocal, §8.2). The rulebook ask
+> (a) — the representative's PID `id` or RP-scoped pseudonym — is
+> tracked as a WE BUILD rulebook change; when it lands,
+> `pseudonym-equals` replaces the names plugin in this flow and the
+> engine does not change.
 
 Read it as: *steps transform a working set; matchers select what a step
 sees; nothing computes.* The schema details follow in §5.2–§5.3.
@@ -319,7 +333,7 @@ scopes the entire pipeline under `when update:` with three sibling `fork:`
 bodies each carrying nested sub-pipelines; `fork-idp-sp.yaml` forks twice
 and continues after. The pipeline is a **flat sequence of heterogeneous
 steps with scoped control wrappers and named working-set snapshots** —
-exactly the shape bw-core needs, minus XML:
+exactly the shape flow-core needs, minus XML:
 
 - **steps interleave freely** — a `presentation` step can appear before
   *and* after an `issuance` step in one flow (present PID → match → issue
@@ -328,7 +342,7 @@ exactly the shape bw-core needs, minus XML:
   (`store as /company` ↔ our step-id context keys — same idea; step ids
   are the v1 names, `as` is not in v1, §14 Q9);
 - **`when:` wrappers scope** a body by mode/condition (the `when:`
-  conditions bw-core needs are match-results and flow modes, not pyFF's
+  conditions flow-core needs are match-results and flow modes, not pyFF's
   request-scoped ones — goFF deprecated those);
 - **`fork:` runs isolated sub-pipelines** over copies of the context —
   bounded, with a documented sandbox discipline (changes don't leak
@@ -406,7 +420,7 @@ Three schema rules that fall out of the above:
 
 ### 5.5 The working set (context)
 
-pyFF's working set is the entity selection; bw-core's is the **flow
+pyFF's working set is the entity selection; flow-core's is the **flow
 context** — a typed document the engine owns:
 
 - **inputs** (fixed at flow start): flow id, initiating session identity
@@ -522,7 +536,7 @@ attack surface (canonicalization, XXE, signature wrapping) and v0.1's
 integrator that already runs a SAML SP asserts the user the way
 issuer-core Mode A already allows — the flow consumes the integrator's
 assertion as a flow input. §2.1 flow 4 is therefore "integrator-asserted
-identity + PID presentation", not a SAML parser in bw-core.
+identity + PID presentation", not a SAML parser in flow-core.
 
 ### 6.5 `fetch`
 
@@ -560,7 +574,7 @@ v0.1 said "WMP is **the** wallet-facing carrier, not a side-channel".
 That conflated three relationships with different protocols and
 different data-visibility rules. Stated separately:
 
-| relationship | protocol | bw-core's role |
+| relationship | protocol | flow-core's role |
 |---|---|---|
 | **(a)** the business wallet's own instances ↔ their backend | WMP, `wmp` profile, `wmp.flow.*` with the openid4x flow types | the WMP **orchestrator** side — or a peer of it (open, below) |
 | **(b)** business wallet ↔ another organisation | WMP (`wmp` or `scc` profile), eDelivery | sender / recipient of messages and evidence |
@@ -579,7 +593,7 @@ carrier exists by construction. Hence:
   §6 defines structured flows with `flow_id`, progress, action,
   complete, error and cancel; the openid4x profile defines the `oid4vp`
   flow (start carries `request_uri_ref` or `dcql_query`) and the
-  `oid4vci` flow (start carries `credential_offer_uri`). A bw-core
+  `oid4vci` flow (start carries `credential_offer_uri`). A flow-core
   presentation step over WMP *is* a `wmp.flow.start` of type `oid4vp`;
   correlation is WMP's `flow_id` plus the OID4VP challenge handle
   (§6.1). v0.1's "flow correlation by challenge handle, generalized"
@@ -601,27 +615,40 @@ carrier exists by construction. Hence:
    the orchestrator from learning which credential a wallet chose, how
    many could answer, or which claims were disclosed (`match` result
    §3.3.3, `select_credentials` §3.2.3.1 — closed sets, refusal on any
-   extra member). bw-core *as verifier* legitimately receives the
+   extra member). flow-core *as verifier* legitimately receives the
    claims at its `response_uri`. The two roles have opposite
    data-visibility properties. If one process hosts both for the
    business instances, the design needs an explicit internal boundary
    (separate types; no shared context between the orchestrator's flow
    record and the verifier's presentation result).
-2. **The holder role.** §1 says a business wallet is issuer + wallet +
-   verifier, but §6 has no holder primitive: nothing in this design
-   answers an inbound OID4VP request from a bank to the business
-   wallet, or signs a presentation with a business-instance key. Either
-   bw-core delegates holding entirely to WMP instances — then the
-   orchestrator is go-wallet-backend / the planned Rust WMP engine and
-   bw-core is a **WMP peer** that starts flows on instances — or
-   bw-core includes the orchestrator. The Rust-engine spec left WMP
-   client-crate ownership open; whichever way this falls, there is one
-   WMP crate, shared, not two.
+2. **The holder role — RESOLVED (owner, 2026-11-09): holding belongs in
+   `siros-wallet-core`, and flow-core delegates it.** flow-core has no
+   holder primitive and never answers an inbound presentation itself;
+   it is a **WMP peer** that starts flows on instances. The holding
+   architecture, decided with it:
+   - `siros-wallet-core` grows a **PKCS#11-backed headless holder** for
+     credentials that are not PID-bound — EBW-OID and similar
+     attestations whose key lives in an HSM, not on a person's device;
+     no code path may require private key material outside the token.
+   - A new repo, **`siros-wallet-headless`** (Rust native), embeds
+     `siros-wallet-core` and provides the **WMP-based interface to a
+     headless holder component** — the server-side wallet instance
+     business deployments run.
+   - **`siros-wscd-manager` grows a PKCS#11 plugin** at the same time,
+     so the headless server wallet does **direct HSM-based binding** —
+     distinct from R2PS, which exists precisely because a *personal*
+     binding requires human direct presence; the headless path binds
+     attestations to HSM-resident keys with no human in the loop.
+   - The old Go CLI attempt (`sirosfoundation/go-siros-cli`) is
+     archived — superseded by the Rust-native headless line.
+   - **One WMP crate, shared**: flow-core (the peer/orchestrator side)
+     and `siros-wallet-headless` (the instance side) build on the same
+     `wmp-core` (already in `siros-wallet-core/crates`), not two
+     implementations.
 
-> **Review note (2026-11-09):** the holder-role / orchestrator boundary
-> is the largest open architectural question in this document (§14
-> Q10). The §13 phasing can start without it — P-bw1 to P-bw3 are
-> carrier (c) — P-bw4 cannot.
+> The §13 phasing proceeds as v0.2 had it — P-bw1 to P-bw3 are carrier
+> (c) and need no holder; P-bw4 (WMP) now lands against
+> `siros-wallet-headless` as the instance it orchestrates.
 
 **Naming collision:** the openid4x profile's `match` flow type means
 *local credential matching in the wallet*. This document therefore
@@ -647,24 +674,40 @@ authority).
 Mode B has none of this; it is the genuinely new primitive family.
 ("Identity match" in v0.1; renamed to avoid WMP's `match` flow type, §7.)
 
-### 8.2 The built-in bind vocabulary (v1)
+### 8.2 The bind vocabulary — one built-in, reference plugins for the rest
 
-Each primitive is a pure function over the context (presentation claims,
-holder keys, session-known data), with a stable refusal code on mismatch:
+**Owner's rule (2026-11-09, v0.3): comparisons are plugin-only except
+where they are 100% unequivocal.** Key comparison is the one such case —
+two holder keys are the same key or they are not, thumbprint to
+thumbprint, with no interpretation, no format rules, and no identity
+inference riding on a value. Everything that compares *values* — claim
+equality, pseudonym equality, rules — is exact as a *comparison* but
+carries a judgment about what the comparison *means as identity
+evidence* (the v0.2 review's exact-vs-probabilistic distinction), and
+judgments live in reviewed plugin code, not in the engine.
+
+**The one built-in:**
 
 | primitive | semantics |
 |---|---|
-| `same-key` | both presentations' holder keys (`cnf.jwk`/`DeviceKey`) are the same key (by thumbprint). Exact, but **narrowly applicable**: under the ARF each attestation carries its own key, so two credentials sharing a holder key is the exception (same-batch issuance to one WSCD key, or a deployment that chooses it). Use it when the credentials' rulebooks guarantee it — not as the default cross-credential check v0.1 made it |
-| `claim-equals(a, b)` | the claim at context path `a` equals the value at path `b` (or a caller-supplied literal) — exact, format-aware path lookup (mdoc literal-key first, SD-JWT nested), mdoc full-date unwrap. Paths are DCQL path arrays (§5.4) |
-| `pseudonym-equals` | a pseudonym the **wallet presented** — a claim such as the ADR 002 RP-scoped pseudonym, or a ZK public output such as nym_auth's — equals the value the session knows for this subject under this RP scope. The engine compares; it **never derives**. Replaces v0.1's `claims-hash`, which hashed `id` + `nonce` on the engine side: ADR 002 makes the wallet the deriver and the nonce a value no RP may hold, and nym_auth already is the derivation rulebook (issuer-core §8.3) |
-| `rule-match` | a **rule** (claim path → expected value) supplied by the flow's initiating caller, evaluated against one presentation — vc's `IdentityMatch` semantics (Appendix B), the issuer-core §6.5 port generalized to any flow step |
+| `same-key` | both presentations' holder keys (`cnf.jwk`/`DeviceKey`) are the same key (by thumbprint) — 100% unequivocal, hence built-in. **Narrowly applicable**: under the ARF each attestation carries its own key, so two credentials sharing a holder key is the exception (same-batch issuance to one WSCD key, or a deployment that chooses it). Use it when the credentials' rulebooks guarantee it |
+
+**Reference plugins** (shipped in-repo, reviewed, allowlisted — the
+`BindPrimitive` trait of §8.3, exactly what a deployment's own plugin
+would be; nothing about them is engine-privileged):
+
+| plugin | semantics |
+|---|---|
+| `claim-equals` | the claim at context path `a` equals the value at path `b` (or a caller-supplied literal) — exact, format-aware path lookup (mdoc literal-key first, SD-JWT nested), mdoc full-date unwrap. Paths are DCQL path arrays (§5.4). A value comparison; whether it is identity evidence is the flow's statement, visible in the definition |
+| `pseudonym-equals` | a pseudonym the **wallet presented** — a claim such as the ADR 002 RP-scoped pseudonym, or a ZK public output such as nym_auth's — equals the value the session knows for this subject under this RP scope. The plugin compares; nothing ever derives (§1). Unequivocal *only if* ADR 002's lifecycle guarantees hold (stability across PID renewal, wallet replacement, recovery); until they do, a mismatch is not proof of different identity — plugin, not built-in, for exactly that reason |
+| `rule-match` | a **rule** (claim path → expected value) supplied by the flow's initiating caller, evaluated against one presentation — vc's `IdentityMatch` semantics (Appendix B), the issuer-core §6.5 port generalized to any flow step. On name attributes it is exact as a comparison but probabilistic as identity evidence; a flow that relies on it says so in the definition (§5.1 review note, §14 Q11) |
 
 Determinism is mandatory (ADR 002's rejection of fuzzy attribute
-matching): every primitive is exact math; **no heuristics in the
-vocabulary**, and a primitive that cannot resolve declares mismatch,
-never best-effort. `rule-match` on name attributes is *exact as a
-comparison* but *probabilistic as identity evidence*; a flow that
-relies on it says so (§5.1 review note, §14 Q11).
+matching): every primitive and plugin is exact math; **no heuristics
+anywhere**, and a primitive that cannot resolve declares mismatch, never
+best-effort. The criterion for ever *joining* the built-ins: the
+comparison must be 100% unequivocal — same key class as `same-key`, not
+same judgment class as a name match.
 
 ### 8.3 User-space hooks (the easy bind-primitive path)
 
@@ -702,7 +745,7 @@ trait BindPrimitive {
 ```yaml
   - bind:
       id: pid-is-session-user
-      primitive: pseudonym-equals          # or a user-space name
+      primitive: pseudonym-equals          # a REFERENCE PLUGIN (§8.2) — or a user-space name; the engine's only built-in is same-key
       left:    { step: present-pid, credential: pid, path: [pseudonym] }
       against: session.subject.pseudonym   # what the session knows
       scope:   rp                          # the RP scope the wallet derived for
@@ -725,7 +768,7 @@ lands twice, deliberately:
    `awaiting_authorization`; `claim_pre_auth_code` requires `offered`).
    No new states; the challenge machinery is reused. The rule shape is
    `rule-match` (vc's `IdentityMatch` port).
-2. **Absorbed by bw-core** at P-bw1: the same flow as a
+2. **Absorbed by flow-core** at P-bw1: the same flow as a
    `presentation → bind → issuance` pipeline, with the issuer-core gate
    remaining for pure-issuer deployments.
 
@@ -798,7 +841,7 @@ Carried up from issuer-core, unchanged in spirit:
 5. **Stable machine-readable refusal codes** for every engine and
    primitive refusal.
 6. **Signing through the Signer interface** — issuance inside flows uses
-   issuer-core's signer (HSM-capable); bw-core adds no signing of its own.
+   issuer-core's signer (HSM-capable); flow-core adds no signing of its own.
 
 ---
 
@@ -846,24 +889,26 @@ Carried up from issuer-core, unchanged in spirit:
 
 | Phase | Scope | Exit criterion |
 |---|---|---|
-| **P-bw1** | Language + engine + FlowStore + **carrier abstraction with the deep-link carrier** + `presentation`/`bind(rule-match, claim-equals)`/`issuance`/`store`; the pre-auth PID→bind→issue flow in the language, parity-tested against the issuer-core §6.5 implementation | that flow definition-only; engine unchanged by a second flow's *data*; definition digest in PDP evidence |
-| **P-bw2** | Multi-query presentations (one transaction, several credential queries; the verifier-core `credential_sets` dependency, §6.1); `same-key`, `pseudonym-equals`; §2.1 flow 1 (company-bound SCA) end-to-end against the resolution of §14 Q11; DC API carrier | §2.1 flow 1 in `flows/`, fixture-backed, with its binding stated honestly |
+| **P-bw1** | Language + engine + FlowStore + **carrier abstraction with the deep-link carrier** + `presentation`/`bind` (`same-key` built-in + the `rule-match`/`claim-equals` reference plugins)/`issuance`/`store`; the pre-auth PID→bind→issue flow in the language, parity-tested against the issuer-core §6.5 implementation | that flow definition-only; engine unchanged by a second flow's *data*; definition digest in PDP evidence |
+| **P-bw2** | Multi-query presentations (one transaction, several credential queries; the verifier-core `credential_sets` dependency, §6.1); `same-key` built-in + the `claim-equals`/`pseudonym-equals`/`rule-match` reference plugins (§8.2); §2.1 flow 1 (company-bound SCA) end-to-end with the names-comparison plugin, labelled probabilistic (§14 Q11 resolved); DC API carrier | §2.1 flow 1 in `flows/`, fixture-backed, with its binding stated honestly |
 | **P-bw3** | `token` (JWT) + `fetch` plugins; §2.1 flow 4 as integrator-asserted identity + PID presentation | plugin allowlist enforcement tested; declared `fetch` inputs checked at load |
-| **P-bw4** | WMP carrier (`wmp.flow.*` adapter, instance selectors, `oid4vp`/`oid4vci` flow types); §2.1 flows 2–3 | wallet instance round-trip over WMP; gated on §14 Q10 |
+| **P-bw4** | WMP carrier (`wmp.flow.*` adapter, instance selectors, `oid4vp`/`oid4vci` flow types); §2.1 flows 2–3 | wallet instance round-trip over WMP — against `siros-wallet-headless` as the instance it orchestrates (§7, Q10 resolved) |
 
 ## 14. Open questions (the iteration list)
 
 1. **RESOLVED (2026-11-08, §5.3): the language.** YAML definitions,
    TOML deployment config, schema = JSON tree.
-2. **Bind primitives — REOPENED (2026-11-09, §8).** The generic concept
-   + the `BindPrimitive` user-space hook stand. Changed: `claims-hash`
-   is withdrawn (it had the engine derive the pseudonym ADR 002 makes
-   the wallet derive) and `pseudonym-equals` takes its place; `same-key`
-   is demoted from default to narrowly applicable. Still open: the exact
-   `BindInputs`/`BindVerdict` surface (needs the P-bw1 implementation
-   to pin), and how `pseudonym-equals` receives the session-side value
-   for a nym_auth-derived pseudonym (verifier-core's ZK public outputs
-   are the obvious carrier).
+2. **RESOLVED (owner, 2026-11-09, §8.2): comparisons are plugin-only
+   except where 100% unequivocal.** `same-key` is the one built-in;
+   `claim-equals`, `pseudonym-equals`, and `rule-match` are **reference
+   plugins** — reviewed, allowlisted code on the same `BindPrimitive`
+   trait a deployment's own plugin would use, nothing engine-privileged.
+   The criterion for joining the built-ins is structural: same key
+   class as `same-key`, never the judgment class of a value comparison.
+   Still open (implementation detail, P-bw1): the exact
+   `BindInputs`/`BindVerdict` surface, and how `pseudonym-equals`
+   receives the session-side value for a nym_auth-derived pseudonym
+   (verifier-core's ZK public outputs are the obvious carrier).
 3. **RESOLVED (2026-11-09, §5.4, §9): PDP placement.** Engine-boundary
    calls, with the definition digest in the evidence; flows express
    policy gates as `when:` over recorded evidence, not as a `pdp:` step.
@@ -873,10 +918,11 @@ Carried up from issuer-core, unchanged in spirit:
    backend's instance registry and is a PDP-governed authorisation
    surface. Needs a pass over the current WMP spec draft and the
    profiles proposal (`wmp/analysis/wmp-protocol-profiles-proposal.md`).
-5. **Repo + naming.** `bw` ties a generic flow engine to the
-   Commission's *EU Business Wallet*, a term with regulatory load this
-   component does not want to carry. Recommendation: `siros-flow-core`;
-   "business wallet" is one deployment of it.
+5. **RESOLVED (owner, 2026-11-09): the repo is `siros-flow-core`.**
+   `bw` tied a generic flow engine to the Commission's *EU Business
+   Wallet*, a term with regulatory load the component does not carry;
+   "business wallet" is one deployment of it. The document and component
+   are renamed throughout (v0.3).
 6. **issuance in-process vs sidecar** — confirm §4.3 recommendation as
    the reference path.
 7. **RESOLVED (2026-11-09, §5.4): definition versioning.** Semver the
@@ -889,16 +935,26 @@ Carried up from issuer-core, unchanged in spirit:
 9. **RESOLVED (2026-11-09, §5.4): `as` and `fork:` are not v1
    constructs.** Step ids are the names. Re-open when a flow needs an
    isolated sub-pipeline.
-10. **NEW — holder role and the orchestrator boundary (§7).** Does
-    bw-core delegate holding to WMP instances (and is then a WMP peer of
-    go-wallet-backend / the Rust WMP engine), or include the
-    orchestrator? Either way, one shared WMP crate. Blocks P-bw4 only.
-11. **NEW — flow #1's binding against the real PoA (§5.1 note).** The
+10. **RESOLVED (owner, 2026-11-09, §7): the holder role.** Holding
+    belongs in `siros-wallet-core`; flow-core delegates and is a WMP
+    peer. The line: `siros-wallet-core` grows the PKCS#11-backed
+    headless holder (non-PID-bound credentials: EBW-OID and similar);
+    the new `siros-wallet-headless` repo (Rust native) embeds it and
+    provides the WMP-facing headless holder component; `siros-wscd-manager`
+    grows the PKCS#11 plugin for direct HSM-based binding (the headless
+    server path — distinct from R2PS's human-presence path); one shared
+    `wmp-core` crate on both sides; `go-siros-cli` archived.
+11. **RESOLVED (owner, 2026-11-09, §5.1 note): flow #1's binding.** The
     WE BUILD PoA identifies its attorney by `attorney_full_name` only.
-    (a) Ask the PoA rulebook for the representative's PID `id` or
-    RP-scoped pseudonym — ADR 002's own direction; or (b) accept a
-    pilot-only `rule-match`-on-names plugin, labelled as probabilistic
-    identity evidence. Blocks P-bw2's exit criterion.
+    Decision 2's plugin-only rule makes (b) the *general mechanism*, not
+    a concession: a **`rule-match`-on-names reference plugin, labelled
+    as probabilistic identity evidence**, is how flow #1 runs against
+    today's PoA. (a) — asking the PoA rulebook for the representative's
+    PID `id` or RP-scoped pseudonym — remains the ADR-002-aligned ask,
+    tracked as a **rulebook change**, not an engine blocker; when the
+    rulebook carries it, `pseudonym-equals` replaces the names plugin in
+    the flow definition and the engine does not change. No longer blocks
+    P-bw2.
 
 ## Appendix A — the four flows, first-cut in the language
 
