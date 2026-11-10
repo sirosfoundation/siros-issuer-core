@@ -3194,7 +3194,7 @@ dependencies = [
 [[package]]
 name = "siros-verifier-core"
 version = "0.1.0"
-source = "git+https://github.com/sirosfoundation/siros-verifier-core?rev=fa7f491beeae1d25f7291fee526462d343dcde5c#fa7f491beeae1d25f7291fee526462d343dcde5c"
+source = "git+https://github.com/sirosfoundation/siros-verifier-core?rev=443b2af71baaf029ef8c4f5877d46cebe76291b4#443b2af71baaf029ef8c4f5877d46cebe76291b4"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",

@@ -22,7 +22,7 @@ mongo = ["dep:mongodb"]
 siros-issuer-core = { path = ".." }
 # TS11 parsing, byte caps and URL policy come from the verifier core; the
 # service adds transport around them.
-siros-verifier-core = { git = "https://github.com/sirosfoundation/siros-verifier-core", rev = "fa7f491beeae1d25f7291fee526462d343dcde5c" }
+siros-verifier-core = { git = "https://github.com/sirosfoundation/siros-verifier-core", rev = "443b2af71baaf029ef8c4f5877d46cebe76291b4" }
 jose-rs = { version = "0.10", default-features = false }
 aes-gcm = "0.11"
 getrandom = "0.4"
@@ -76,5 +76,5 @@ tempfile = "3"
 # verifier-core; never a production dependency surface.
 [dev-dependencies.siros-verifier-core]
 git = "https://github.com/sirosfoundation/siros-verifier-core"
-rev = "fa7f491beeae1d25f7291fee526462d343dcde5c"
+rev = "443b2af71baaf029ef8c4f5877d46cebe76291b4"
 features = ["testutil"]
