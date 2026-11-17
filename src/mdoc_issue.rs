@@ -43,14 +43,14 @@ const CRV_P256: i64 = 1;
 
 pub type Cbor = ciborium::Value;
 
-fn enc(v: &Cbor) -> Result<Vec<u8>> {
+pub(crate) fn enc(v: &Cbor) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     ciborium::into_writer(v, &mut out)
         .map_err(|e| Error::new(code::TRANSPORT, format!("cbor encode: {e}")))?;
     Ok(out)
 }
 
-fn tmap(entries: Vec<(Cbor, Cbor)>) -> Cbor {
+pub(crate) fn tmap(entries: Vec<(Cbor, Cbor)>) -> Cbor {
     Cbor::Map(entries.into_iter().collect())
 }
 

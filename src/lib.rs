@@ -19,6 +19,7 @@ pub mod sdjwt_issue;
 pub mod session;
 pub mod signer;
 pub mod status_client;
+pub mod status_cwt;
 pub mod trust;
 pub mod zk;
 
