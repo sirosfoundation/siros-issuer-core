@@ -1119,6 +1119,31 @@ machine, never as a parallel path.
    malformed-x5c fail-closed, iss↔cert disagreement, PoP positive/negative
    + legacy. Config absent ⇒ private_key_jwt only (the conformance profile,
    unchanged).
+
+   **REVISED (issue #6, 2026-11-17): the client-auth REQUIREMENT is
+   per-deployment and per-grant.** The unconditional demand was the
+   conformance profile's shape, and the suite never sees the gap
+   because it always speaks `private_key_jwt` — but real wallet
+   engines de-facto send **no client auth on the pre-authorized
+   grant** (the SIROS sample via the WMP engine was refused on a
+   fresh single-use code while issuing from every vc-based issuer;
+   vc's own code states the posture: the one-time pre-authorized
+   code plus the optional tx_code is the security mechanism, DPoP
+   optional per OID4VCI §4.1.1). The surface is now
+   `[authorization] pre_authorized_client_auth = "required"` (the
+   default — the conformance profile above, every existing
+   deployment unchanged) `| "optional"` (vc's deployment posture:
+   **absence tolerated on the pre-authorized grant alone**).
+   Optional ≠ anarchy: an auth method PRESENT is still verified and
+   a bad one refuses (recoded invalid_client, RFC 6749 §5.2 — the
+   previously universal invalid_grant misreport sent live debugging
+   down the expired/consumed-code path); the authorization_code
+   grant never relaxes (its client was authenticated at PAR); the
+   bad-assertion refusal PRECEDES the single-use claim, so an
+   impostor does not burn the code. 4 posture tests (required
+   refuses absence; optional accepts the unauthenticated
+   redemption; optional still refuses a bad assertion without
+   burning the code; optional never relaxes auth-code).
 2. **Mode B process topology:** in-process embedding of verifier-core crates is the v1
    default (simplest, single binary). Should a deployment mode that delegates
    presentation verification to a deployed siros-verifier-service (via a signed receipt
