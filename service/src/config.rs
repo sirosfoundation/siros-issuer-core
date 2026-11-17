@@ -320,6 +320,9 @@ pub struct MongoCfg {
     #[serde(default = "default_sessions_collection")]
     pub collection: String,
 }
+fn default_true() -> bool {
+    true
+}
 
 fn default_sessions_collection() -> String {
     "sessions".to_owned()
@@ -405,6 +408,16 @@ pub struct IssuerCfg {
     pub url: String,
     #[serde(default)]
     pub authorization_servers: Vec<String>,
+    /// The response-encryption posture (issue #21): the issuer
+    /// ANNOUNCES and REQUIRES encrypted credential responses by
+    /// default — encryption is used as much as possible. An explicit
+    /// `false` opts the deployment out (the conformance profile's
+    /// plain variant; a wallet fleet that cannot). `false` together
+    /// with a to_wallet auxiliary-data plan is a CONFIGURATION ERROR
+    /// at startup (api::validate_response_encryption): an opening
+    /// never crosses the wire in the clear, whatever the knob says.
+    #[serde(default = "default_true")]
+    pub response_encryption_required: bool,
     /// Local-test-only: allow plain-HTTP non-loopback URLs (the conformance
     /// compose network). The verifier-core conformance fixtures carry the
     /// same escape hatch (allow_invalid_status_list_certificates). Never

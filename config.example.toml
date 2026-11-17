@@ -177,6 +177,16 @@ challenge_per_minute = 20   # POST authorization-challenge (+ Mode B response)
 # [authorization.refresh_token]
 # duration = 86400   # seconds; each rotation extends it
 
+# ── Response encryption (Final §12.2.4, issue #21) ─────────────────────
+# The issuer's posture: encryption REQUIRED by default — wallets can
+# always use it (the suites are always advertised) and plain responses
+# are served only when a deployment explicitly opts out. An explicit
+# false is for wallet fleets that cannot encrypt (the conformance
+# profile's plain variants). A to_wallet auxiliary-data opening is
+# refused in the clear EITHER way (endpoint-enforced).
+# [issuer]
+# response_encryption_required = true
+
 # ── Pre-auth strong binding (design §6.5 v2) ──────────────────────────────
 # Present ⇒ the pre-authorized grant demands a PID presentation before
 # token issuance (vc's PrepareIssuance.identity_match semantics: the

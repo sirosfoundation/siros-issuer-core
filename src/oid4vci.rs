@@ -254,6 +254,7 @@ pub fn metadata_from_catalog(
     authorization_servers: Vec<Url>,
     paths: &EndpointPaths,
     auxiliary_data_plans: &BTreeMap<String, AuxiliaryDataSupported>,
+    encryption_required: bool,
 ) -> Result<CredentialIssuerMetadata> {
     let credential_request_encryption = paths.request_encryption_jwk.as_ref().map(|jwk| {
         // Publish the PUBLIC members only: `d` never leaves the
@@ -337,7 +338,15 @@ pub fn metadata_from_catalog(
         credential_response_encryption: IssuerResponseEncryption {
             alg_values_supported: vec!["ECDH-ES"],
             enc_values_supported: vec!["A128GCM"],
-            encryption_required: false,
+            // The deployment's own posture (issue #21): the issuer
+            // announces and REQUIRES encrypted responses by default
+            // (the service config — default true), opts out only
+            // explicitly, and NEVER opts out of a to_wallet secret
+            // delivery (api::validate_response_encryption refuses the
+            // config at startup). Wallets key their S2 negotiation on
+            // this member — it advertises the truth the endpoint
+            // enforces.
+            encryption_required,
         },
         credential_request_encryption,
         credential_configurations_supported: configurations,

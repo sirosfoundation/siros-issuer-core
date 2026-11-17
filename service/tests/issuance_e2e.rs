@@ -114,6 +114,17 @@ fn fixture_config() -> Config {
         r#"
 [issuer]
 url = "http://127.0.0.1:8080"
+# The conformance profile's posture (issue #21): plain responses are
+# served on request — the suite's plain variants cover exactly this
+# path. The production default is TRUE (encryption as much as
+# possible); an opening is refused in the clear EITHER way (the
+# nym_auth e2e proves it). The startup validation would refuse a
+# false-with-to_wallet config, so this fixture splits: the plain
+# variants run here; the rulebook credential's encryption is the
+# nym_auth e2e's own path — see a_to_wallet_opening_refuses_a_plain_response
+# (the rulebook credential under THIS false fixture still refuses —
+# the secrets rule is non-negotiable).
+response_encryption_required = false
 
 [catalog]
 static_dir = "{dir}/ts11"
@@ -126,6 +137,9 @@ refresh_seconds = 0
 # at [doctype, ssc]. LOCAL TEST ONLY: the seed is in-line.
 [zk.circuits]
 static_dir = "{dir}/zkcircuits"
+
+[zk]
+advertise_auxiliary_data = true
 
 [zk.rulebooks.nym_auth]
 credentials = ["eu.europa.ec.eudi.nym_auth.1"]
@@ -393,6 +407,7 @@ async fn spawn_service_dyn_posture(
         clients: Arc::new(suite_client_registry()),
         pre_authorized_client_auth,
         refresh_token,
+        response_encryption_required: config.issuer.response_encryption_required,
         scopes: std::collections::HashMap::new(),
         endpoint_paths: siros_issuer_core::oid4vci::EndpointPaths {
             batch_credential: Some(("batch-credential", 4)),
@@ -400,7 +415,12 @@ async fn spawn_service_dyn_posture(
             ..Default::default()
         },
         deferred_interval_seconds: 5,
-        auxiliary_data_plans: std::collections::BTreeMap::new(),
+        auxiliary_data_plans: if config.zk.advertise_auxiliary_data {
+            siros_issuer_service::api::auxiliary_data_plans(&config.zk.rulebooks)
+                .unwrap_or_else(|e| panic!("the fixture's aux-data plans: {e}"))
+        } else {
+            std::collections::BTreeMap::new()
+        },
         zk_seeds: Default::default(),
         request_encryption_key: None,
         cert_chain_der: cert_chain_der.clone(),
@@ -2853,23 +2873,40 @@ async fn nym_auth_rulebook_issuance_resolves_salt_and_commitments_from_config() 
     )
     .unwrap();
 
-    // 3. Credential.
+    // 3. Credential — with response encryption (issue #21): a to_wallet
+    //    opening never crosses the wire in the clear; the plain request
+    //    for this credential is refused (the test below asserts that),
+    //    so the happy path asks for encryption and decrypts the JWE
+    //    with the wallet's own key.
+    let response_encryption_key = jose_rs::jwk::generate_ec("P-256").unwrap();
     let response = client
         .post(format!("{}/credential", service.base))
         .bearer_auth(token["access_token"].as_str().unwrap())
         .json(&json!({
             "credential_configuration_id": "eu.europa.ec.eudi.nym_auth.1",
             "proofs": { "attestation": [attestation] },
+            "credential_response_encryption": {
+                "jwk": response_encryption_key.to_public_jwk(),
+                "alg": "ECDH-ES",
+                "enc": "A128GCM",
+            },
         }))
         .send()
         .await
         .unwrap();
     let http_status = response.status();
-    let credential: Value = response.json().await.unwrap();
+    let jwe = response.text().await.unwrap();
     assert!(
         http_status.is_success(),
-        "nym_auth credential: {http_status} {credential}"
+        "nym_auth credential: {http_status} {jwe}"
     );
+    assert!(
+        jwe.split('.').count() == 5,
+        "the response is a JWE (the opening rides encrypted): {jwe}"
+    );
+    let decrypted = siros_issuer_core::response::decrypt_response(&jwe, &response_encryption_key)
+        .expect("the wallet key decrypts the response");
+    let credential: Value = serde_json::from_slice(&decrypted).expect("the decrypted payload");
 
     // 4. Oracle: the response carries the opening (the auxiliary-data
     //    extension), type hash_commitment, at the ssc path.
@@ -5030,4 +5067,184 @@ async fn credential_endpoint_accepts_the_dpop_scheme() {
         credential["credentials"][0]["credential"].is_string(),
         "the DPoP scheme rides the credential request: {credential}"
     );
+}
+
+// ─── Issue #21: a to_wallet opening never crosses the wire in the clear ──
+
+/// The fail-closed refusal: a PLAIN request (no
+/// credential_response_encryption) for the rulebook credential is
+/// refused — never answered with the ssc opening in the clear. This is
+/// the tcpdump'd realeyes shape, corrected.
+#[tokio::test]
+async fn a_to_wallet_opening_refuses_a_plain_response() {
+    use base64::Engine as _;
+    let allocator = Arc::new(RecordingAllocator {
+        list_url: Url::parse("http://127.0.0.1:9/lists/x").unwrap(),
+        next_index: AtomicU64::new(31),
+        updates: Mutex::new(Vec::new()),
+    });
+    let service = spawn_service(Arc::new(PermitPdp), allocator, test_signer()).await;
+    let integrator = ec_key();
+    let (created, _) = create_session(
+        &service,
+        &integrator,
+        json!({
+            "credential": "eu.europa.ec.eudi.nym_auth.1",
+            "subject": {
+                "eu.europa.ec.eudi.nym_auth.1": {
+                    "birth_date": "1982-07-12",
+                    "birthplace_country": "SE",
+                    "issuing_country": "SE",
+                    "personal_administrative_number": "18880307-9999",
+                }
+            }
+        }),
+    )
+    .await;
+    assert!(created.status().is_success());
+    let body: Value = created.json().await.unwrap();
+    let offer_uri = body["offer_uri"].as_str().unwrap().to_owned();
+
+    let client = reqwest::Client::new();
+    let offer: Value = client
+        .get(format!(
+            "{}{}",
+            service.base,
+            offer_uri.trim_start_matches(ISSUER_BASE)
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let code = offer["grants"][GRANT_PRE_AUTHORIZED_CODE]["pre-authorized_code"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let token: Value = client
+        .post(format!("{}/token", service.base))
+        .form(&token_form(&[
+            ("grant_type", GRANT_PRE_AUTHORIZED_CODE.to_owned()),
+            ("pre_authorized_code", code),
+        ]))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    // The mdoc attestation proof (same shape as the nym_auth e2e).
+    let attestation_key: jose_rs::jwk::Jwk = serde_json::from_str(
+        r#"{"kty":"EC","x":"ktT77AqMntawPyU772lBg8nd7cwENrYyOL_KWbYN8Jc","y":"67lPXEq5gJdimDYD0AacxLfRfIm2-fSNd3HBqyXXvBI","crv":"P-256","d":"KJEKZo2PQq6E40P6HMenViCVBRXoWD2FDyevRsJnlG0","kid":"attestation-1","alg":"ES256","use":"sig"}"#,
+    )
+    .unwrap();
+    let device_jwk: Value = serde_json::from_value(json!({
+        "kty": "EC",
+        "x": "_MUU-7kbV7WJXhrXJuDaAhHKqvDBHq-a4NH1ekAqo8I",
+        "y": "7JpnjHEJoyGLdjw_HkNBI9KU7CsswTrDTb7RSmLZ5m0",
+        "crv": "P-256", "kid": "device-1", "alg": "ES256", "use": "sig",
+    }))
+    .unwrap();
+    // The mdoc attestation proof (the nym_auth e2e's exact shape:
+    // key-attestation+jwt over the self-signed attestation cert).
+    let attestation_cert_der = {
+        let key = p256::ecdsa::SigningKey::from_slice(
+            &siros_issuer_core::sdjwt_issue::b64u_decode(attestation_key.d.as_deref().unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        use p256::pkcs8::EncodePrivateKey;
+        let pkcs8 = key.to_pkcs8_der().unwrap();
+        let kp = rcgen::KeyPair::from_pkcs8_der_and_sign_algo(
+            &rustls_pki_types::PrivatePkcs8KeyDer::from(pkcs8.as_bytes()),
+            &rcgen::PKCS_ECDSA_P256_SHA256,
+        )
+        .unwrap();
+        let params =
+            rcgen::CertificateParams::new(vec!["attestation.example.org".to_string()]).unwrap();
+        let cert = params.self_signed(&kp).unwrap();
+        cert.der().to_vec()
+    };
+    let mut header = jose_rs::JoseHeader::new("ES256");
+    header.typ = Some("key-attestation+jwt".to_owned());
+    header.x5c = Some(vec![
+        base64::engine::general_purpose::STANDARD.encode(&attestation_cert_der)
+    ]);
+    let now = now_unix();
+    let attestation = {
+        let payload = serde_json::to_vec(&json!({
+            "attested_keys": [device_jwk],
+            "nonce": token["c_nonce"],
+            "iat": now,
+            "exp": now + 300,
+        }))
+        .unwrap();
+        let opts = jose_rs::jws::compact::SignOptions::new().with_key_reference_headers(true);
+        jose_rs::jws::compact::sign_with_jwk_options(&attestation_key, &payload, &header, &opts)
+            .unwrap()
+    };
+
+    // PLAIN — no credential_response_encryption: refused.
+    let response = client
+        .post(format!("{}/credential", service.base))
+        .bearer_auth(token["access_token"].as_str().unwrap())
+        .json(&json!({
+            "credential_configuration_id": "eu.europa.ec.eudi.nym_auth.1",
+            "proofs": { "attestation": [attestation] },
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(
+        status,
+        reqwest::StatusCode::BAD_REQUEST,
+        "the plain request for a to_wallet credential refuses: {body}"
+    );
+    assert!(
+        body.to_string().contains("must be encrypted"),
+        "the refusal names the rule: {body}"
+    );
+}
+
+/// The knob's semantics (issue #21): default TRUE — encryption is used
+/// as much as possible; wallets can always use it (the suites are
+/// always advertised) and the issuer REQUIRES it unless the deployment
+/// explicitly turns it off. The endpoint enforcement is the secrets
+/// guarantee (a to_wallet opening never crosses in the clear, knob or
+/// no knob — a_to_wallet_opening_refuses_a_plain_response proves it
+/// under this very fixture's explicit opt-out).
+#[test]
+fn response_encryption_required_defaults_to_true() {
+    // Default (no [issuer] response_encryption_required): true.
+    let cfg = siros_issuer_service::config::Config::from_toml_str(
+        r#"
+[issuer]
+url = "https://i.example.org"
+
+[catalog]
+static_dir = "."
+"#,
+    )
+    .expect("minimal config parses");
+    assert!(
+        cfg.issuer.response_encryption_required,
+        "the default posture: encryption required"
+    );
+    // Explicit false: the opt-out.
+    let cfg = siros_issuer_service::config::Config::from_toml_str(
+        r#"
+[issuer]
+url = "https://i.example.org"
+response_encryption_required = false
+
+[catalog]
+static_dir = "."
+"#,
+    )
+    .expect("opt-out config parses");
+    assert!(!cfg.issuer.response_encryption_required);
 }

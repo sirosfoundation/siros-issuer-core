@@ -136,6 +136,9 @@ pub async fn credential_issuer_metadata(
         state.authorization_servers.clone(),
         &state.endpoint_paths,
         &state.auxiliary_data_plans,
+        // The deployment's own posture (issue #21): the announced
+        // truth, enforced at the endpoint.
+        state.response_encryption_required,
     )
     .expect("a validated issuer base URL and catalog cannot fail generation");
 
@@ -989,6 +992,33 @@ fn credential_response(
     response: &CredentialResponse,
     encryption: Option<&CredentialResponseEncryption>,
 ) -> HandlerResult<Response> {
+    // The aux-data extension's own rule (issue #21), fail-closed: a
+    // to_wallet opening NEVER crosses the wire in the clear. A plain
+    // request (no credential_response_encryption) for a credential
+    // whose response carries an opening is refused — the engine's
+    // wallet-side gate ("auxiliary_data arrived in a plain response;
+    // the issuer must encrypt it") and the issuer must agree. This
+    // runs BEFORE the encryption branch: the plain path below is
+    // unreachable for a secret-carrying response.
+    let carries_openings = response
+        .credential_metadata
+        .as_ref()
+        .map(|metadata| {
+            metadata
+                .auxiliary_data
+                .iter()
+                .any(|entry| entry.opening.is_some())
+        })
+        .unwrap_or(false);
+    if (carries_openings || state.response_encryption_required) && encryption.is_none() {
+        let why = if carries_openings {
+            "this credential carries a to_wallet auxiliary-data opening; the response must be encrypted (send credential_response_encryption)"
+        } else {
+            "this issuer requires encrypted credential responses (send credential_response_encryption)"
+        };
+        return Err(credential_err(state, &Error::invalid_input(why)));
+    }
+
     let body =
         serde_json::to_vec(response).map_err(|e| err(Error::invalid_input(e.to_string())))?;
 

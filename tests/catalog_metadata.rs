@@ -58,6 +58,8 @@ fn catalog_drives_metadata_and_configuration_ids() {
         vec![],
         &EndpointPaths::default(),
         &std::collections::BTreeMap::new(),
+        // The default posture (issue #21): required.
+        true,
     )
     .unwrap();
 
@@ -103,7 +105,9 @@ fn catalog_drives_metadata_and_configuration_ids() {
         metadata.credential_response_encryption.alg_values_supported,
         vec!["ECDH-ES"]
     );
-    assert!(!metadata.credential_response_encryption.encryption_required);
+    // The default posture (issue #21): encryption required — the site
+    // below passes true.
+    assert!(metadata.credential_response_encryption.encryption_required);
 
     // Endpoints hang off the issuer base (ID1 §11.2.1 credential_endpoint).
     assert_eq!(
@@ -128,6 +132,8 @@ fn proof_types_follow_the_format() {
         vec![],
         &EndpointPaths::default(),
         &std::collections::BTreeMap::new(),
+        // The default posture (issue #21): required.
+        true,
     )
     .unwrap();
 
@@ -234,6 +240,8 @@ fn session_api_identifiers_match_configuration_ids() {
         vec![],
         &EndpointPaths::default(),
         &std::collections::BTreeMap::new(),
+        // The default posture (issue #21): required.
+        true,
     )
     .unwrap();
     for configuration_id in metadata.credential_configurations_supported.keys() {
@@ -263,6 +271,8 @@ fn credential_request_encryption_carries_only_final_schema_members() {
         vec![],
         &paths,
         &std::collections::BTreeMap::new(),
+        // The default posture (issue #21): required.
+        true,
     )
     .unwrap();
     let cre = metadata.credential_request_encryption.expect("declared");

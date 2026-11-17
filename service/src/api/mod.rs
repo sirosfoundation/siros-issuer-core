@@ -174,6 +174,12 @@ pub struct AppState {
     /// None ⇒ the grant is off — `unsupported_grant_type` at /token,
     /// nothing minted, nothing advertised in the AS metadata.
     pub refresh_token: Option<crate::config::RefreshTokenCfg>,
+    /// The response-encryption posture (issue #21): announce and
+    /// require encrypted credential responses (the deployment's
+    /// default — as much encryption as possible); an explicit config
+    /// false opts out. A to_wallet opening is refused in the clear
+    /// EITHER way.
+    pub response_encryption_required: bool,
     /// ZK rulebooks (design §8.3 item 5): name → bundle. General data —
     /// issuance resolves the one bundle governing the session's
     /// credential (startup validation guarantees uniqueness).
