@@ -157,6 +157,16 @@ challenge_per_minute = 20   # POST authorization-challenge (+ Mode B response)
 # # etsi (x5c) | ietf (iss/JWKS) | empty = either:
 # mode = ""
 
+# ── The pre-authorized grant's client-auth posture (issue #6) ────────────
+# required (default) — the conformance profile: private_key_jwt or
+#   WIA on every token request (the OIDF issuer plan's shape).
+# optional — vc's deployment posture: the wallet ecosystem de-facto
+#   sends NO client auth on this grant (the single-use code, hashed at
+#   rest and atomically claimed, is the security mechanism); ABSENCE
+#   is tolerated, a method PRESENT is still verified, and the
+#   authorization_code grant never relaxes.
+# pre_authorized_client_auth = "required"
+
 # ── Pre-auth strong binding (design §6.5 v2) ──────────────────────────────
 # Present ⇒ the pre-authorized grant demands a PID presentation before
 # token issuance (vc's PrepareIssuance.identity_match semantics: the

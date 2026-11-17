@@ -76,6 +76,32 @@ pub struct AuthorizationCfg {
     /// wildcard rules; a PDP provider is the production path.
     #[serde(default)]
     pub attestation: AttestationCfg,
+    /// The client-authentication posture for the **pre-authorized grant**
+    /// (issue #6): `required` (the default — the conformance profile's
+    /// private_key_jwt/WIA on every token request) or `optional` (vc's
+    /// deployment posture: the single-use pre-authorized code — hashed
+    /// at rest, atomically claimed — plus the optional tx_code is the
+    /// security mechanism, and wallet engines de-facto send no client
+    /// auth on this grant). Optional ≠ unauthenticated-anarchy: an
+    /// auth method PRESENT is still verified, and a bad assertion
+    /// refuses — only ABSENCE is tolerated. The authorization_code
+    /// grant never relaxes (its client was authenticated at PAR).
+    #[serde(default)]
+    pub pre_authorized_client_auth: PreAuthorizedClientAuth,
+}
+
+/// The pre-authorized grant's client-auth posture (issue #6).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum PreAuthorizedClientAuth {
+    /// Client auth required on every token request (the conformance
+    /// profile — the OIDF issuer plan always speaks private_key_jwt).
+    #[default]
+    Required,
+    /// Absence tolerated on the pre-authorized grant (vc's posture);
+    /// presence still verified.
+    #[serde(rename = "optional")]
+    Optional,
 }
 
 /// A rulebook (design §8.3 item 5): the bundle that makes a credential

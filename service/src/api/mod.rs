@@ -134,6 +134,11 @@ pub struct AppState {
     pub login_url: Option<url::Url>,
     /// Pre-registered clients for the AS surface (design §12.2-resolved).
     pub clients: std::sync::Arc<crate::client_auth::ClientRegistry>,
+    /// The pre-authorized grant's client-auth posture (issue #6):
+    /// `required` (the conformance profile) or `optional` (vc's
+    /// deployment posture — absence tolerated on that grant alone;
+    /// presence still verified; the auth-code grant never relaxes).
+    pub pre_authorized_client_auth: crate::config::PreAuthorizedClientAuth,
     /// The attestation policy layer (vc translation).
     pub attestation: std::sync::Arc<dyn crate::client_auth::AttestationPolicy>,
     /// §5.1.2 scope → credential_configuration_id.

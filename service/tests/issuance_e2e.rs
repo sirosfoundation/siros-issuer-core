@@ -332,6 +332,32 @@ async fn spawn_service_dyn(
     deferred: bool,
     binding: Option<siros_issuer_service::config::PreAuthBindingCfg>,
 ) -> SignerAgnosticService {
+    spawn_service_dyn_posture(
+        pdp,
+        allocator,
+        signer,
+        _public,
+        cert_chain_der,
+        deferred,
+        binding,
+        siros_issuer_service::config::PreAuthorizedClientAuth::Required,
+    )
+    .await
+}
+
+/// The full spawn: the client-auth posture is a parameter (issue #6's
+/// optional deployment).
+#[allow(clippy::too_many_arguments)]
+async fn spawn_service_dyn_posture(
+    pdp: Arc<dyn TrustPdp>,
+    allocator: Arc<RecordingAllocator>,
+    signer: Arc<dyn siros_issuer_core::signer::Signer>,
+    _public: jose_rs::jwk::Jwk,
+    cert_chain_der: Vec<Vec<u8>>,
+    deferred: bool,
+    binding: Option<siros_issuer_service::config::PreAuthBindingCfg>,
+    pre_authorized_client_auth: siros_issuer_service::config::PreAuthorizedClientAuth,
+) -> SignerAgnosticService {
     // Any port: issuer_base is what signed URLs carry; bind 0 and use it.
     let issuer_base = Url::parse("http://127.0.0.1:8080").unwrap();
     let config = fixture_config();
@@ -360,6 +386,7 @@ async fn spawn_service_dyn(
         last_public_nonce: Arc::new(std::sync::Mutex::new(String::new())),
         login_url: Some(Url::parse("http://127.0.0.1:8080/dev-portal/login").unwrap()),
         clients: Arc::new(suite_client_registry()),
+        pre_authorized_client_auth,
         scopes: std::collections::HashMap::new(),
         endpoint_paths: siros_issuer_core::oid4vci::EndpointPaths {
             batch_credential: Some(("batch-credential", 4)),
@@ -4062,5 +4089,248 @@ async fn pre_auth_binding_requires_a_nonempty_rule() {
         created.status(),
         reqwest::StatusCode::BAD_REQUEST,
         "an empty identity_match rule is refused"
+    );
+}
+
+// ─── Issue #6: the pre-authorized grant's client-auth posture ───────────────
+
+/// Mint a pre-auth session, return the pre-authorized code.
+async fn mint_pre_auth_code(service: &TestService) -> String {
+    let integrator = ec_key();
+    let (created, _) = create_session(
+        service,
+        &integrator,
+        json!({"credential": "urn:eudi:pid:1", "subject": {"given_name": "A", "family_name": "B"}}),
+    )
+    .await;
+    let body: Value = created.json().await.unwrap();
+    let offer_uri = body["offer_uri"].as_str().unwrap().to_owned();
+    let client = reqwest::Client::new();
+    let offer: Value = client
+        .get(format!(
+            "{}{}",
+            service.base,
+            offer_uri.trim_start_matches(ISSUER_BASE)
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    offer["grants"][GRANT_PRE_AUTHORIZED_CODE]["pre-authorized_code"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// The REQUIRED posture (the default, the conformance profile): a token
+/// request with NO client auth refuses — and with the RFC 6749 §5.2
+/// code `invalid_client`, never the misdirecting `invalid_grant` the
+/// issue's live debugging chased.
+#[tokio::test]
+async fn required_posture_refuses_unauthenticated_with_invalid_client() {
+    let allocator = Arc::new(RecordingAllocator {
+        list_url: Url::parse("http://127.0.0.1:9/lists/test-list").unwrap(),
+        next_index: AtomicU64::new(7),
+        updates: Mutex::new(Vec::new()),
+    });
+    let service = spawn_service(Arc::new(PermitPdp), allocator, test_signer()).await;
+    let code = mint_pre_auth_code(&service).await;
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("{}/token", service.base))
+        .form(&[
+            ("grant_type", GRANT_PRE_AUTHORIZED_CODE.to_owned()),
+            ("pre_authorized_code", code),
+        ])
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(
+        body["error"], "invalid_client",
+        "RFC 6749 §5.2's client-auth failure code (issue #6's misreport: {body})"
+    );
+    assert!(
+        body["error_description"]
+            .as_str()
+            .is_some_and(|d| d.contains("client authentication required")),
+        "{body}"
+    );
+}
+
+/// The OPTIONAL posture (vc's, issue #6's ask): the pre-authorized grant
+/// tolerates an UNAUTHENTICATED token request — the single-use code,
+/// hashed at rest and atomically claimed, is the security mechanism —
+/// and the token answers normally.
+#[tokio::test]
+async fn optional_posture_accepts_unauthenticated_pre_auth() {
+    let allocator = Arc::new(RecordingAllocator {
+        list_url: Url::parse("http://127.0.0.1:9/lists/test-list").unwrap(),
+        next_index: AtomicU64::new(7),
+        updates: Mutex::new(Vec::new()),
+    });
+    let (signer, private) = test_signer();
+    let public = siros_issuer_core::signer::Signer::public_jwk(&signer).expect("public jwk");
+    let cert_chain = signer_cert_chain(&private);
+    let svc = spawn_service_dyn_posture(
+        Arc::new(PermitPdp),
+        allocator,
+        Arc::new(signer),
+        public,
+        cert_chain,
+        false,
+        None,
+        siros_issuer_service::config::PreAuthorizedClientAuth::Optional,
+    )
+    .await;
+    let service = TestService {
+        base: svc.base,
+        signer: siros_issuer_core::signer::JwkSigner::new(private).expect("signer"),
+    };
+    let code = mint_pre_auth_code(&service).await;
+
+    let client = reqwest::Client::new();
+    let token: Value = client
+        .post(format!("{}/token", service.base))
+        .form(&[
+            ("grant_type", GRANT_PRE_AUTHORIZED_CODE.to_owned()),
+            ("pre_authorized_code", code),
+        ])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        token["access_token"].is_string(),
+        "the unauthenticated pre-auth redemption answers a token: {token}"
+    );
+    assert!(token["c_nonce"].is_string(), "{token}");
+}
+
+/// Optional ≠ anarchy: an assertion PRESENT but BAD refuses under both
+/// postures — only ABSENCE is tolerated.
+#[tokio::test]
+async fn optional_posture_still_refuses_a_bad_assertion() {
+    let allocator = Arc::new(RecordingAllocator {
+        list_url: Url::parse("http://127.0.0.1:9/lists/test-list").unwrap(),
+        next_index: AtomicU64::new(7),
+        updates: Mutex::new(Vec::new()),
+    });
+    let (signer, private) = test_signer();
+    let public = siros_issuer_core::signer::Signer::public_jwk(&signer).expect("public jwk");
+    let cert_chain = signer_cert_chain(&private);
+    let svc = spawn_service_dyn_posture(
+        Arc::new(PermitPdp),
+        allocator,
+        Arc::new(signer),
+        public,
+        cert_chain,
+        false,
+        None,
+        siros_issuer_service::config::PreAuthorizedClientAuth::Optional,
+    )
+    .await;
+    let service = TestService {
+        base: svc.base,
+        signer: siros_issuer_core::signer::JwkSigner::new(private).expect("signer"),
+    };
+    let code = mint_pre_auth_code(&service).await;
+
+    // An assertion from a key the registry does not know (a foreign
+    // principal): refused — the posture never downgrades verification.
+    let impostor = ec_key();
+    let assertion = client_assertion(&impostor, &Url::parse(ISSUER_BASE).unwrap());
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("{}/token", service.base))
+        .form(&[
+            ("grant_type", GRANT_PRE_AUTHORIZED_CODE.to_owned()),
+            ("pre_authorized_code", code.clone()),
+            (
+                "client_assertion_type",
+                "urn:ietf:params:oauth:client-assertion-type:jwt-bearer".to_owned(),
+            ),
+            ("client_assertion", assertion),
+        ])
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "invalid_client", "{body}");
+
+    // The refusal did NOT burn the code: the honest redemption (the
+    // SAME code, unauthenticated) still succeeds — the bad-assertion
+    // check precedes the claim.
+    let token: Value = client
+        .post(format!("{}/token", service.base))
+        .form(&[
+            ("grant_type", GRANT_PRE_AUTHORIZED_CODE.to_owned()),
+            ("pre_authorized_code", code),
+        ])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(token["access_token"].is_string(), "{token}");
+}
+
+/// The optional posture never relaxes the authorization_code grant:
+/// its client was authenticated at PAR, and a code redemption with no
+/// client auth refuses with invalid_client under EITHER posture.
+#[tokio::test]
+async fn optional_posture_never_relaxes_the_authorization_code_grant() {
+    let allocator = Arc::new(RecordingAllocator {
+        list_url: Url::parse("http://127.0.0.1:9/lists/test-list").unwrap(),
+        next_index: AtomicU64::new(7),
+        updates: Mutex::new(Vec::new()),
+    });
+    let (signer, private) = test_signer();
+    let public = siros_issuer_core::signer::Signer::public_jwk(&signer).expect("public jwk");
+    let cert_chain = signer_cert_chain(&private);
+    let svc = spawn_service_dyn_posture(
+        Arc::new(PermitPdp),
+        allocator,
+        Arc::new(signer),
+        public,
+        cert_chain,
+        false,
+        None,
+        siros_issuer_service::config::PreAuthorizedClientAuth::Optional,
+    )
+    .await;
+    let service = TestService {
+        base: svc.base,
+        signer: siros_issuer_core::signer::JwkSigner::new(private).expect("signer"),
+    };
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("{}/token", service.base))
+        .form(&[
+            ("grant_type", "authorization_code".to_owned()),
+            ("code", "whatever".to_owned()),
+            ("redirect_uri", "http://localhost:3000/cb".to_owned()),
+            ("code_verifier", "a".repeat(43)),
+        ])
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(
+        body["error"], "invalid_client",
+        "the auth-code grant never relaxes (issue #6): {body}"
     );
 }

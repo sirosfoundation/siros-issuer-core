@@ -8,6 +8,11 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Refusal codes. Stable across releases; protocol-visible.
 pub mod code {
     pub const INVALID_INPUT: &str = "invalid_input";
+    /// Client authentication failed at a token endpoint — RFC 6749
+    /// §5.2 reserves `invalid_client` for this class (issue #6: the
+    /// refusals misreported as `invalid_grant`, sending live debugging
+    /// down the expired/consumed-code path).
+    pub const INVALID_CLIENT: &str = "invalid_client";
     /// A proof whose c_nonce value is wrong or stale (OID4VCI credential
     /// error `invalid_nonce`).
     pub const INVALID_NONCE: &str = "invalid_nonce";

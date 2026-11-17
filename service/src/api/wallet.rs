@@ -79,6 +79,16 @@ fn credential_err(state: &AppState, error: &Error) -> Response {
 /// The OAuth 2.0 error shape (RFC 6749 §5.2 / OID4VCI §8.3.1): token
 /// endpoint errors carry `error` + `error_description` — the conformance
 /// suite shape-checks these; `message` is not a known member.
+/// A client-authentication failure crossing to the OAuth error shape:
+/// RFC 6749 §5.2's `invalid_client` class — the verifier's message
+/// survives (never values), the code tells the class (issue #6).
+fn client_auth_failure(error: Error) -> Error {
+    Error::new(
+        siros_issuer_core::error::code::INVALID_CLIENT,
+        error.message,
+    )
+}
+
 fn oauth_err(error: Error) -> Response {
     let status = StatusCode::BAD_REQUEST;
     (
@@ -94,6 +104,10 @@ fn oauth_err(error: Error) -> Response {
 fn oauth_error_code(error: &Error) -> &'static str {
     match error.code {
         siros_issuer_core::error::code::INVALID_INPUT => "invalid_grant",
+        // RFC 6749 §5.2: client-authentication failures — issue #6's
+        // misreport (invalid_grant sent the live debugging down the
+        // expired/consumed-code path).
+        siros_issuer_core::error::code::INVALID_CLIENT => "invalid_client",
         siros_issuer_core::error::code::UNSUPPORTED_CREDENTIAL => "unsupported_credential_format",
         _ => "invalid_request",
     }
@@ -376,6 +390,7 @@ pub async fn token(
 
     let grant_type = get("grant_type").unwrap_or_default();
     let now = now_unix();
+    let is_pre_auth_flow = grant_type == GRANT_PRE_AUTHORIZED_CODE;
 
     // Client authentication (design §12.2-resolved + §12.1 WIA/KA): the
     // OIDF issuer plan speaks private_key_jwt — RFC 7523 against the
@@ -385,6 +400,16 @@ pub async fn token(
     // form-body `client_assertion` (no PoP), vc's token-handler flow —
     // registered clients first, attestation when the client is not (or
     // the attestation headers are present).
+    //
+    // **The pre-authorized posture (issue #6)**: `required` (the
+    // default, the conformance profile) refuses an absent method;
+    // `optional` (vc's deployment posture — the wallet ecosystem's
+    // de-facto shape on this grant) tolerates ABSENCE only: a method
+    // PRESENT is still verified, and a bad one refuses. The
+    // authorization_code grant never relaxes — its client was
+    // authenticated at PAR.
+    let client_auth_optional = is_pre_auth_flow
+        && state.pre_authorized_client_auth == crate::config::PreAuthorizedClientAuth::Optional;
     let client_assertion = get("client_assertion");
     let assertion_type = get("client_assertion_type");
     let client_id = get("client_id");
@@ -413,7 +438,7 @@ pub async fn token(
             evaluator
                 .evaluate_with_pop(attestation, pop, scope)
                 .await
-                .map_err(oauth_err)?;
+                .map_err(|e| oauth_err(client_auth_failure(e)))?;
         }
         // No headers: RFC 7523 private_key_jwt against the registry.
         (None, _) => {
@@ -430,10 +455,18 @@ pub async fn token(
                         now,
                         60,
                     )
-                    .map_err(oauth_err)?;
+                    .map_err(|e| oauth_err(client_auth_failure(e)))?;
                 }
+                // Absence: refused under the required posture (RFC 6749
+                // §5.2 — invalid_client, never the misdirecting
+                // invalid_grant of issue #6); tolerated on the
+                // pre-authorized grant when the deployment says
+                // optional (vc's posture — the single-use code is the
+                // security mechanism).
+                _ if client_auth_optional => {}
                 _ => {
-                    return Err(oauth_err(Error::invalid_input(
+                    return Err(oauth_err(Error::new(
+                        siros_issuer_core::error::code::INVALID_CLIENT,
                         "client authentication required: private_key_jwt (client_assertion) or OAuth-Client-Attestation (WIA)",
                     )))
                 }
