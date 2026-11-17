@@ -49,6 +49,9 @@ const flow = new IssuanceFlow({
   onPreview: (handle) => myApp.renderConsent(handle),
   // Optional: observe state transitions (offered → issued → accepted…).
   onState: (state) => myApp.analytics(state),
+  // Optional: brand the QR — the issuer's or a partner's logo as a
+  // centred badge over the server-rendered SVG (see "Branded QR").
+  qrLogo: "/img/issuer-logo.png",
 });
 
 flow.render(sessionId);
@@ -78,6 +81,40 @@ flow.render(sessionId);
 | `qr` | Renders the offer as a QR (server-rendered `qr_svg` if the backend serves one) |
 | `deep-link` | Assigns the `openid-credential-offer://` wallet redirect |
 | `dc-api` | Same-device issuance through the injected `@sirosfoundation/dc-api` shim (`issueCredentialFromOffer` — the offer URI is the same one the QR carries); graceful fallback with a clear message when the API or wallet is unavailable |
+
+### Branded QR
+
+`qrLogo` (string | URL) overlays a logo badge at the QR code's centre —
+the plate is white, rounded, subtly bordered, and the logo renders at
+~78% inside it, so its edges never touch the code's modules.
+
+Two rules make it scannable — both are the integrator's, the module
+enforces neither:
+
+1. **Render the QR at `errorCorrectionLevel: 'H'`** — the backend that
+   serves `qr_svg` chooses the level; a centre badge needs the headroom.
+   The module cannot change the matrix (and must not: the badge is an
+   overlay *on* the returned SVG, never baked into it). The common
+   `qrcode` defaults (`M`/`L`) have no headroom — a badge over them will
+   not scan.
+2. **Keep the plate ≤ ~30% of the code's width** — `qrLogoSize` (percent
+   of the width, default `20` — about 4% of the code's *area*) is
+   validated to the 8–30 window. The default 20 is the size proven
+   scannable from a phone at level H; larger is at your own risk.
+
+```js
+const flow = new IssuanceFlow({
+  // …
+  qrLogo: "/img/issuer-logo.png", // or new URL("https://…")
+  qrLogoSize: 20,                  // % of the code's width (default 20)
+  qrLogoAlt: "Issuer logo",        // the badge image's alt text
+});
+```
+
+No `qr_svg` in the handle → no badge (the QR falls back to its text
+fallback). The overlay's geometry is inline (structural — it works
+without any app CSS); the `qr-logo-wrap`, `qr-logo-badge`, `qr-logo`
+class names let an app restyle it.
 
 ### Status
 

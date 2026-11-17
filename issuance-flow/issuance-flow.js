@@ -80,6 +80,12 @@ export class IssuanceFlow {
   // `onPreview(handle)` (optional): called when a preview is possible; the
   // app renders consent from its own data (§10.2.5) — the module still
   // never touches claim values.
+  // `qrLogo` (issue #12): string | URL — the issuer's or a partner's
+  // logo, rendered as a centred badge OVER the server-rendered `qr_svg`
+  // (an overlay, never baked into the matrix). `qrLogoSize`: the plate's
+  // span as a % of the code's width (default 20 — ~4% of its area; the
+  // level-H error-correction headroom covers it; see README "Branded
+  // QR"). `qrLogoAlt`: the badge image's alt text.
   constructor({
     root,
     getSession,
@@ -89,6 +95,9 @@ export class IssuanceFlow {
     onPreview = null,
     onState = null,
     refreshHandle = null,
+    qrLogo = null,
+    qrLogoSize = 20,
+    qrLogoAlt = "Issuer logo",
   }) {
     // A browser (or the test's window stub — the module is DOM-thin).
     const env = typeof window !== "undefined" ? window : globalThis.window;
@@ -114,6 +123,24 @@ export class IssuanceFlow {
     // Optional refresh of the handle after issuance-relevant events
     // (default: re-fetch via getSession).
     this.refreshHandle = refreshHandle;
+    // Branded QR (issue #12): the logo badge's source, size, alt.
+    if (qrLogo !== null && qrLogo !== undefined) {
+      if (qrLogo instanceof URL) qrLogo = qrLogo.href;
+      if (typeof qrLogo !== "string" || !qrLogo.trim()) {
+        throw new TypeError("qrLogo must be a non-empty string or URL");
+      }
+    } else {
+      qrLogo = null;
+    }
+    if (typeof qrLogoSize !== "number" || !Number.isFinite(qrLogoSize) || qrLogoSize < 8 || qrLogoSize > 30) {
+      throw new RangeError("qrLogoSize must be a number between 8 and 30 (percent of the code's width)");
+    }
+    if (typeof qrLogoAlt !== "string") {
+      throw new TypeError("qrLogoAlt must be a string");
+    }
+    this.qrLogo = qrLogo;
+    this.qrLogoSize = qrLogoSize;
+    this.qrLogoAlt = qrLogoAlt;
     this.runId = 0;
     this.handle = null;
     this.esr = null;
@@ -188,8 +215,14 @@ export class IssuanceFlow {
       const qr = document.createElement("div");
       qr.className = "qr-code";
       if (handle.qr_svg) {
-        // Server-rendered SVG (the backend served a data: URI).
-        qr.innerHTML = handle.qr_svg;
+        // Server-rendered SVG (the backend served a data: URI). With a
+        // `qrLogo`: the badge overlay (issue #12) — the plate + centred
+        // logo over the SVG, never baked into the matrix.
+        if (this.qrLogo) {
+          qr.append(this.renderQrBadge(handle.qr_svg));
+        } else {
+          qr.innerHTML = handle.qr_svg;
+        }
       } else {
         qr.textContent = "Enable an image, or scan from the issuer page";
         qr.setAttribute("aria-label", "Credential offer QR code");
@@ -200,6 +233,51 @@ export class IssuanceFlow {
   }
 
   // Launch the chosen mechanism. DC-API: the shim's
+  // The branded-QR badge overlay (issue #12): a white, rounded plate
+  // with the logo, absolutely centred over the server-rendered SVG.
+  // The geometry is inline (structural — the overlay works without any
+  // app CSS); the class names let an app restyle. The plate spans
+  // `qrLogoSize`% of the code's WIDTH (~4% of its area at the default
+  // 20) — the shape the realeyes demo proved scannable from a phone at
+  // level H. The backend must render `qr_svg` at errorCorrectionLevel
+  // 'H' when a badge is used (the module cannot change the matrix);
+  // see README "Branded QR".
+  renderQrBadge(svg) {
+    const wrap = document.createElement("div");
+    wrap.className = "qr-logo-wrap";
+    const badge = document.createElement("div");
+    badge.className = "qr-logo-badge";
+    const logo = document.createElement("img");
+    logo.className = "qr-logo";
+    logo.src = this.qrLogo;
+    logo.alt = this.qrLogoAlt;
+    // The plate, over the code, centred, sized in the code's terms.
+    wrap.style.position = "relative";
+    wrap.style.display = "inline-block";
+    badge.style.position = "absolute";
+    badge.style.top = "50%";
+    badge.style.left = "50%";
+    badge.style.transform = "translate(-50%, -50%)";
+    badge.style.width = `${this.qrLogoSize}%`;
+    badge.style.aspectRatio = "1 / 1";
+    // The plate: white, rounded, a subtle border — the logo sits inside
+    // at ~78%, so its edges never touch the code's modules.
+    badge.style.background = "#fff";
+    badge.style.borderRadius = "10%";
+    badge.style.border = "1px solid rgba(0, 0, 0, 0.12)";
+    badge.style.display = "flex";
+    badge.style.alignItems = "center";
+    badge.style.justifyContent = "center";
+    badge.style.boxSizing = "border-box";
+    logo.style.width = "78%";
+    logo.style.height = "auto";
+    badge.append(logo);
+    // The code first, the badge over it — the overlay, not the matrix.
+    wrap.innerHTML = svg;
+    wrap.append(badge);
+    return wrap;
+  }
+
   // `issueCredentialFromOffer` — null (unavailable) falls back to QR.
   async launch(mechanism) {
     const handle = this.handle;

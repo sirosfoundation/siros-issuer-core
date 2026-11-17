@@ -31,6 +31,7 @@ globalThis.document = {
   createElement: () => ({
     children: [],
     dataset: {},
+    style: {},
     append(...kids) {
       this.children.push(...kids);
     },
@@ -49,6 +50,7 @@ const element = () => {
   const el = Object.create(windowStub.HTMLElement.prototype);
   el.children = [];
   el.dataset = {};
+  el.style = {};
   el.append = function (...kids) {
     this.children.push(...kids);
   };
@@ -242,4 +244,129 @@ test("render emits the current state and the module never fetches beyond the app
   } finally {
     flow.stop();
   }
+});
+
+// ─── Branded QR (issue #12) ───────────────────────────────────────────────────
+
+// The QR structure walker: the rendered launch section's .qr-code div.
+const qrCodeOf = (root) => {
+  const find = (node, className) => {
+    for (const kid of node.children ?? []) {
+      if (kid.className === className) return kid;
+      const hit = find(kid, className);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  return find(root, "qr-code");
+};
+
+test("qrLogo validates its inputs", () => {
+  const base = { root: element(), getSession: async () => ({}) };
+  // string and URL are the source shapes; empty and non-string refuse.
+  new IssuanceFlow({ ...base, qrLogo: "/img/logo.png" }); // eslint-disable-line no-new
+  new IssuanceFlow({ ...base, qrLogo: new URL("https://i.example/logo.png") }); // eslint-disable-line no-new
+  assert.throws(() => new IssuanceFlow({ ...base, qrLogo: "" }), TypeError);
+  assert.throws(() => new IssuanceFlow({ ...base, qrLogo: 42 }), TypeError);
+  // The size window: the level-H headroom (a plate wider than 30% of the
+  // code is not scannable at any level; narrower than 8% is not a badge).
+  assert.throws(() => new IssuanceFlow({ ...base, qrLogo: "/l.png", qrLogoSize: 45 }), RangeError);
+  assert.throws(() => new IssuanceFlow({ ...base, qrLogo: "/l.png", qrLogoSize: 5 }), RangeError);
+  assert.throws(() => new IssuanceFlow({ ...base, qrLogo: "/l.png", qrLogoSize: "big" }), RangeError);
+  assert.throws(() => new IssuanceFlow({ ...base, qrLogo: "/l.png", qrLogoAlt: null }), TypeError);
+});
+
+test("qrLogo renders the badge overlay on the server SVG — never baked into the matrix", async () => {
+  const root = element();
+  const flow = new IssuanceFlow({
+    root,
+    getSession: async () => ({
+      session_id: "s1",
+      state: "offered",
+      offer_uri: "https://i.example/o/1",
+      qr_svg: "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",
+    }),
+    invocations: ["qr"],
+    qrLogo: "/img/siros-logo.png",
+  });
+  await flow.render("s1");
+  const qr = qrCodeOf(root);
+  assert.ok(qr, "the qr-code block renders");
+  const wrap = qr.children.find((kid) => kid.className === "qr-logo-wrap");
+  assert.ok(wrap, "the overlay wrap renders");
+  // The server's SVG, verbatim inside the wrap — the badge is an overlay
+  // ON the code, never baked into the matrix.
+  assert.equal(wrap.innerHTML, "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>");
+  const badge = wrap.children.find((kid) => kid.className === "qr-logo-badge");
+  assert.ok(badge, "the badge plate renders");
+  const [logo] = badge.children;
+  assert.equal(logo.src, "/img/siros-logo.png");
+  assert.equal(logo.alt, "Issuer logo");
+  // The geometry: absolutely centred, sized in the code's terms (20% of
+  // the width at the default), on a white rounded plate.
+  assert.equal(badge.style.position, "absolute");
+  assert.equal(badge.style.top, "50%");
+  assert.equal(badge.style.left, "50%");
+  assert.equal(badge.style.transform, "translate(-50%, -50%)");
+  assert.equal(badge.style.width, "20%");
+  assert.equal(badge.style.background, "#fff");
+});
+
+test("a URL qrLogo renders its href; a custom size and alt render", async () => {
+  const root = element();
+  const flow = new IssuanceFlow({
+    root,
+    getSession: async () => ({
+      session_id: "s1",
+      state: "offered",
+      offer_uri: "https://i.example/o/1",
+      qr_svg: "<svg></svg>",
+    }),
+    invocations: ["qr"],
+    qrLogo: new URL("https://brand.example/logo.svg"),
+    qrLogoSize: 30,
+    qrLogoAlt: "Brand logo",
+  });
+  await flow.render("s1");
+  const wrap = qrCodeOf(root).children.find((kid) => kid.className === "qr-logo-wrap");
+  const badge = wrap.children.find((kid) => kid.className === "qr-logo-badge");
+  const [logo] = badge.children;
+  assert.equal(logo.src, "https://brand.example/logo.svg");
+  assert.equal(logo.alt, "Brand logo");
+  assert.equal(badge.style.width, "30%");
+});
+
+test("without qrLogo the QR renders exactly as before (server SVG injected, no wrap)", async () => {
+  const root = element();
+  const flow = new IssuanceFlow({
+    root,
+    getSession: async () => ({
+      session_id: "s1",
+      state: "offered",
+      offer_uri: "https://i.example/o/1",
+      qr_svg: "<svg></svg>",
+    }),
+    invocations: ["qr"],
+  });
+  await flow.render("s1");
+  const qr = qrCodeOf(root);
+  assert.equal(qr.innerHTML, "<svg></svg>", "the SVG injects directly — no overlay");
+  assert.ok(!qr.children.some((kid) => kid.className === "qr-logo-wrap"));
+});
+
+test("qrLogo with no server SVG keeps the fallback (the badge never renders without a code)", async () => {
+  const root = element();
+  const flow = new IssuanceFlow({
+    root,
+    getSession: async () => ({
+      session_id: "s1",
+      state: "offered",
+      offer_uri: "https://i.example/o/1",
+    }),
+    invocations: ["qr"],
+    qrLogo: "/img/logo.png",
+  });
+  await flow.render("s1");
+  const qr = qrCodeOf(root);
+  assert.ok(!qr.children.some((kid) => kid.className === "qr-logo-wrap"), "no badge without a code");
 });

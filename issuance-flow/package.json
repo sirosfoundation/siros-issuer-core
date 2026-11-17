@@ -1,6 +1,6 @@
 {
   "name": "@sirosfoundation/issuance-flow",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Framework-free OpenID4VCI issuance UX — QR, deep link, and Digital Credentials API handover, driven by opaque handles only (no PII)",
   "keywords": [
     "openid4vci",
