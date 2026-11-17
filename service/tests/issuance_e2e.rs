@@ -6,15 +6,18 @@
 //! own code (design §13.3 cross-check invariant).
 
 use serde_json::{json, Value};
-use siros_issuer_core::oid4vci::{GRANT_AUTHORIZATION_CODE, GRANT_PRE_AUTHORIZED_CODE};
+use siros_issuer_core::oid4vci::{
+    GRANT_AUTHORIZATION_CODE, GRANT_PRE_AUTHORIZED_CODE, GRANT_REFRESH_TOKEN,
+};
 use siros_issuer_core::signer::Signer;
 use siros_issuer_core::status_client::Status;
 use siros_issuer_service::api::{AppState, RefreshStatus};
+use siros_issuer_service::config::{Config, RefreshTokenCfg};
+use siros_issuer_service::fetch;
 use siros_issuer_service::pdp::TrustPdp;
 use siros_issuer_service::status::{now_unix, StatusAllocator};
 use siros_issuer_service::store::MemoryStore;
 use siros_issuer_service::vault::Vault;
-use siros_issuer_service::{config::Config, fetch};
 use siros_verifier_core::sdjwt::{verify as verify_sdjwt, HolderBinding, StaticKey, VerifyParams};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -341,6 +344,7 @@ async fn spawn_service_dyn(
         deferred,
         binding,
         siros_issuer_service::config::PreAuthorizedClientAuth::Required,
+        None,
     )
     .await
 }
@@ -357,6 +361,7 @@ async fn spawn_service_dyn_posture(
     deferred: bool,
     binding: Option<siros_issuer_service::config::PreAuthBindingCfg>,
     pre_authorized_client_auth: siros_issuer_service::config::PreAuthorizedClientAuth,
+    refresh_token: Option<siros_issuer_service::config::RefreshTokenCfg>,
 ) -> SignerAgnosticService {
     // Any port: issuer_base is what signed URLs carry; bind 0 and use it.
     let issuer_base = Url::parse("http://127.0.0.1:8080").unwrap();
@@ -387,6 +392,7 @@ async fn spawn_service_dyn_posture(
         login_url: Some(Url::parse("http://127.0.0.1:8080/dev-portal/login").unwrap()),
         clients: Arc::new(suite_client_registry()),
         pre_authorized_client_auth,
+        refresh_token,
         scopes: std::collections::HashMap::new(),
         endpoint_paths: siros_issuer_core::oid4vci::EndpointPaths {
             batch_credential: Some(("batch-credential", 4)),
@@ -3544,6 +3550,9 @@ async fn retention_sweeper_expires_purges_and_hard_deletes() {
         revoked: false,
         created_at_unix: now - 1000,
         expires_at_unix: expires,
+        refresh_token_hash: None,
+        refresh_token_expires_unix: None,
+        refresh_dpop_jkt: None,
         history: Vec::new(),
     };
 
@@ -4186,6 +4195,7 @@ async fn optional_posture_accepts_unauthenticated_pre_auth() {
         false,
         None,
         siros_issuer_service::config::PreAuthorizedClientAuth::Optional,
+        None,
     )
     .await;
     let service = TestService {
@@ -4235,6 +4245,7 @@ async fn optional_posture_still_refuses_a_bad_assertion() {
         false,
         None,
         siros_issuer_service::config::PreAuthorizedClientAuth::Optional,
+        None,
     )
     .await;
     let service = TestService {
@@ -4307,6 +4318,7 @@ async fn optional_posture_never_relaxes_the_authorization_code_grant() {
         false,
         None,
         siros_issuer_service::config::PreAuthorizedClientAuth::Optional,
+        None,
     )
     .await;
     let service = TestService {
@@ -4332,5 +4344,491 @@ async fn optional_posture_never_relaxes_the_authorization_code_grant() {
     assert_eq!(
         body["error"], "invalid_client",
         "the auth-code grant never relaxes (issue #6): {body}"
+    );
+}
+
+// ─── Gap 1: the refresh_token grant (RFC 6749 §6, design §12.1's third) ──
+
+/// A fresh DPoP proof from a wallet key (RFC 9449 §4.2: htm/htu/iat/jti
+/// + the inline jwk; `ath` when replaying a bound access token).
+fn dpop_proof(key: &jose_rs::jwk::Jwk, htm: &str, htu: &str, ath: Option<&str>) -> String {
+    let mut b = vec![0u8; 16];
+    getrandom::fill(&mut b).expect("OS randomness");
+    let mut claims = json!({
+        "htm": htm,
+        "htu": htu,
+        "iat": now_unix(),
+        "jti": siros_issuer_core::sdjwt_issue::b64u(&b),
+    });
+    if let Some(ath) = ath {
+        claims["ath"] = json!(ath);
+    }
+    sign_jwt(key, "dpop+jwt", &claims, true)
+}
+
+fn token_endpoint_url() -> String {
+    Url::parse(ISSUER_BASE)
+        .unwrap()
+        .join("token")
+        .unwrap()
+        .to_string()
+}
+
+fn credential_endpoint_url() -> String {
+    Url::parse(ISSUER_BASE)
+        .unwrap()
+        .join("credential")
+        .unwrap()
+        .to_string()
+}
+
+/// Spawn with the refresh-token grant's deployment config as a
+/// parameter (gap 1); everything else the conformance profile.
+async fn spawn_service_refresh(refresh: Option<RefreshTokenCfg>) -> TestService {
+    let (signer, private) = test_signer();
+    let public = siros_issuer_core::signer::Signer::public_jwk(&signer).expect("public jwk");
+    let cert_chain = signer_cert_chain(&private);
+    let svc = spawn_service_dyn_posture(
+        Arc::new(PermitPdp),
+        Arc::new(RecordingAllocator {
+            list_url: Url::parse("http://127.0.0.1:9/lists/test-list").unwrap(),
+            next_index: AtomicU64::new(7),
+            updates: Mutex::new(Vec::new()),
+        }),
+        Arc::new(signer),
+        public,
+        cert_chain,
+        false,
+        None,
+        siros_issuer_service::config::PreAuthorizedClientAuth::Required,
+        refresh,
+    )
+    .await;
+    TestService {
+        base: svc.base,
+        signer: siros_issuer_core::signer::JwkSigner::new(private).expect("signer"),
+    }
+}
+
+/// Redeem a pre-auth code DPoP-bound, returning (token JSON, the wallet
+/// DPoP key) — the refresh tests' base.
+async fn redeem_dpop_bound(service: &TestService, code: String) -> (Value, jose_rs::jwk::Jwk) {
+    let key = ec_key();
+    let client = reqwest::Client::new();
+    let token: Value = client
+        .post(format!("{}/token", service.base))
+        .header(
+            "DPoP",
+            dpop_proof(&key, "POST", &token_endpoint_url(), None),
+        )
+        .form(&token_form(&[
+            ("grant_type", GRANT_PRE_AUTHORIZED_CODE.to_owned()),
+            ("pre_authorized_code", code),
+        ]))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    (token, key)
+}
+
+/// Minting follows the config and the binding: a DPoP-bound token
+/// exchange answers a refresh token + expiry; a DPoP-free one carries
+/// no member (unusable by design — refresh demands the issuance-time
+/// key); the disabled deployment never mints and the AS metadata
+/// advertises the third grant only when enabled.
+#[tokio::test]
+async fn refresh_minting_follows_the_config_and_the_binding() {
+    let service = spawn_service_refresh(Some(RefreshTokenCfg { duration: 3600 })).await;
+    let client = reqwest::Client::new();
+
+    // Enabled + DPoP-bound: minted.
+    let code = mint_pre_auth_code(&service).await;
+    let (token, _key) = redeem_dpop_bound(&service, code).await;
+    let refresh_token = token["refresh_token"]
+        .as_str()
+        .expect("refresh_token minted")
+        .to_owned();
+    assert!(refresh_token.starts_with("rt_"), "{token}");
+    assert_eq!(token["refresh_token_expires_in"], 3600, "{token}");
+
+    // Enabled but DPoP-free: no member at all.
+    let code = mint_pre_auth_code(&service).await;
+    let plain: Value = client
+        .post(format!("{}/token", service.base))
+        .form(&token_form(&[
+            ("grant_type", GRANT_PRE_AUTHORIZED_CODE.to_owned()),
+            ("pre_authorized_code", code),
+        ]))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(plain.get("refresh_token").is_none(), "{plain}");
+
+    // The AS metadata advertises the grant when enabled…
+    let as_md: Value = client
+        .get(format!(
+            "{}/.well-known/oauth-authorization-server",
+            service.base
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        as_md["grant_types_supported"]
+            .as_array()
+            .expect("grant list")
+            .iter()
+            .any(|g| g == "refresh_token"),
+        "{as_md}"
+    );
+
+    // …and never when disabled (the default deployment).
+    let off = spawn_service_refresh(None).await;
+    let code = mint_pre_auth_code(&off).await;
+    let (token, _key) = redeem_dpop_bound(&off, code).await;
+    assert!(token.get("refresh_token").is_none(), "{token}");
+    let as_md: Value = client
+        .get(format!(
+            "{}/.well-known/oauth-authorization-server",
+            off.base
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        !as_md["grant_types_supported"]
+            .as_array()
+            .expect("grant list")
+            .iter()
+            .any(|g| g == "refresh_token"),
+        "{as_md}"
+    );
+}
+
+/// The happy path, the strongest proof: refresh rotates the pair, then a
+/// CREDENTIAL ISSUES against the refreshed access token + c_nonce (they
+/// are live on the session, not a parallel path).
+#[tokio::test]
+async fn refresh_grant_rotates_and_issues() {
+    let service = spawn_service_refresh(Some(RefreshTokenCfg { duration: 3600 })).await;
+    let client = reqwest::Client::new();
+
+    let code = mint_pre_auth_code(&service).await;
+    let (token, dpop_key) = redeem_dpop_bound(&service, code).await;
+    let r1 = token["refresh_token"].as_str().unwrap().to_owned();
+
+    // The refresh: a fresh proof from the SAME key.
+    let refreshed: Value = client
+        .post(format!("{}/token", service.base))
+        .header(
+            "DPoP",
+            dpop_proof(&dpop_key, "POST", &token_endpoint_url(), None),
+        )
+        .form(&token_form(&[
+            ("grant_type", GRANT_REFRESH_TOKEN.to_owned()),
+            ("refresh_token", r1),
+        ]))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let at2 = refreshed["access_token"].as_str().unwrap().to_owned();
+    let nonce2 = refreshed["c_nonce"].as_str().unwrap().to_owned();
+    let r2 = refreshed["refresh_token"].as_str().unwrap().to_owned();
+    assert_ne!(r2, token["refresh_token"].as_str().unwrap(), "rotated");
+    assert_ne!(at2, token["access_token"].as_str().unwrap(), "new token");
+
+    // Issue on the refreshed pair — the DPoP-bound token demands its
+    // proof (ath) at the credential endpoint.
+    let holder = ec_key();
+    let proof = proof_jwt(&holder, &Url::parse(ISSUER_BASE).unwrap(), &nonce2);
+    let credential: Value = client
+        .post(format!("{}/credential", service.base))
+        .header(
+            "DPoP",
+            dpop_proof(
+                &dpop_key,
+                "POST",
+                &credential_endpoint_url(),
+                Some(&siros_issuer_service::dpop::access_token_hash(&at2)),
+            ),
+        )
+        .bearer_auth(&at2)
+        .json(&json!({
+            "credential_configuration_id": "urn:eudi:pid:1",
+            "proof": { "proof_type": "jwt", "jwt": proof },
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        credential["credentials"][0]["credential"].is_string(),
+        "a credential issues on the refreshed token: {credential}"
+    );
+}
+
+/// RFC 6749 §6 single-use: the first rotation moves the token — the
+/// replay of the OLD one answers invalid_grant, and the NEW one chains
+/// (the refusal disturbed nothing).
+#[tokio::test]
+async fn refresh_grant_is_single_use() {
+    let service = spawn_service_refresh(Some(RefreshTokenCfg { duration: 3600 })).await;
+    let client = reqwest::Client::new();
+
+    let code = mint_pre_auth_code(&service).await;
+    let (token, dpop_key) = redeem_dpop_bound(&service, code).await;
+    let r1 = token["refresh_token"].as_str().unwrap().to_owned();
+
+    let first: Value = client
+        .post(format!("{}/token", service.base))
+        .header(
+            "DPoP",
+            dpop_proof(&dpop_key, "POST", &token_endpoint_url(), None),
+        )
+        .form(&token_form(&[
+            ("grant_type", GRANT_REFRESH_TOKEN.to_owned()),
+            ("refresh_token", r1.clone()),
+        ]))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let r2 = first["refresh_token"].as_str().unwrap().to_owned();
+
+    // The replay of r1: invalid_grant (vc: "refresh token has already
+    // been used").
+    let replay = client
+        .post(format!("{}/token", service.base))
+        .header(
+            "DPoP",
+            dpop_proof(&dpop_key, "POST", &token_endpoint_url(), None),
+        )
+        .form(&token_form(&[
+            ("grant_type", GRANT_REFRESH_TOKEN.to_owned()),
+            ("refresh_token", r1.clone()),
+        ]))
+        .send()
+        .await
+        .unwrap();
+    let status = replay.status();
+    let body: Value = replay.json().await.unwrap();
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "invalid_grant", "{body}");
+
+    // r2 still chains — the replay disturbed nothing.
+    let second: Value = client
+        .post(format!("{}/token", service.base))
+        .header(
+            "DPoP",
+            dpop_proof(&dpop_key, "POST", &token_endpoint_url(), None),
+        )
+        .form(&token_form(&[
+            ("grant_type", GRANT_REFRESH_TOKEN.to_owned()),
+            ("refresh_token", r2),
+        ]))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(second["access_token"].is_string(), "{second}");
+}
+
+/// Sender-constraint with the no-burn property: a WRONG DPoP key
+/// refuses invalid_grant and the token is NOT consumed — the rightful
+/// key still refreshes (the peek precedes the CAS rotation, the same
+/// ordering property as the auth-code grant's Mode B check).
+#[tokio::test]
+async fn refresh_grant_wrong_key_never_burns() {
+    let service = spawn_service_refresh(Some(RefreshTokenCfg { duration: 3600 })).await;
+    let client = reqwest::Client::new();
+
+    let code = mint_pre_auth_code(&service).await;
+    let (token, dpop_key) = redeem_dpop_bound(&service, code).await;
+    let r1 = token["refresh_token"].as_str().unwrap().to_owned();
+
+    // A different key's proof: refused, "does not match".
+    let wrong = client
+        .post(format!("{}/token", service.base))
+        .header(
+            "DPoP",
+            dpop_proof(&ec_key(), "POST", &token_endpoint_url(), None),
+        )
+        .form(&token_form(&[
+            ("grant_type", GRANT_REFRESH_TOKEN.to_owned()),
+            ("refresh_token", r1.clone()),
+        ]))
+        .send()
+        .await
+        .unwrap();
+    let status = wrong.status();
+    let body: Value = wrong.json().await.unwrap();
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "invalid_grant", "{body}");
+    assert!(
+        body["error_description"]
+            .as_str()
+            .is_some_and(|d| d.contains("does not match")),
+        "{body}"
+    );
+
+    // The rightful key still refreshes: not burned.
+    let ok: Value = client
+        .post(format!("{}/token", service.base))
+        .header(
+            "DPoP",
+            dpop_proof(&dpop_key, "POST", &token_endpoint_url(), None),
+        )
+        .form(&token_form(&[
+            ("grant_type", GRANT_REFRESH_TOKEN.to_owned()),
+            ("refresh_token", r1),
+        ]))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(ok["access_token"].is_string(), "{ok}");
+}
+
+/// The proof is REQUIRED (sender-constrained refresh, ARF 3.0
+/// §6.6.6.2.2): its absence refuses — and does not burn.
+#[tokio::test]
+async fn refresh_grant_requires_a_dpop_proof() {
+    let service = spawn_service_refresh(Some(RefreshTokenCfg { duration: 3600 })).await;
+    let client = reqwest::Client::new();
+
+    let code = mint_pre_auth_code(&service).await;
+    let (token, dpop_key) = redeem_dpop_bound(&service, code).await;
+    let r1 = token["refresh_token"].as_str().unwrap().to_owned();
+
+    let bare = client
+        .post(format!("{}/token", service.base))
+        .form(&token_form(&[
+            ("grant_type", GRANT_REFRESH_TOKEN.to_owned()),
+            ("refresh_token", r1.clone()),
+        ]))
+        .send()
+        .await
+        .unwrap();
+    let status = bare.status();
+    let body: Value = bare.json().await.unwrap();
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "invalid_grant", "{body}");
+    assert!(
+        body["error_description"]
+            .as_str()
+            .is_some_and(|d| d.contains("DPoP proof is required")),
+        "{body}"
+    );
+
+    let ok: Value = client
+        .post(format!("{}/token", service.base))
+        .header(
+            "DPoP",
+            dpop_proof(&dpop_key, "POST", &token_endpoint_url(), None),
+        )
+        .form(&token_form(&[
+            ("grant_type", GRANT_REFRESH_TOKEN.to_owned()),
+            ("refresh_token", r1),
+        ]))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(ok["access_token"].is_string(), "{ok}");
+}
+
+/// The disabled deployment answers as if the grant did not exist —
+/// `unsupported_grant_type` (RFC 6749 §5.2), never a misleading
+/// invalid_grant — and unknown grants answer the same.
+#[tokio::test]
+async fn refresh_grant_disabled_and_unknown_grants_answer_unsupported() {
+    let service = spawn_service_refresh(None).await;
+    let client = reqwest::Client::new();
+
+    let body: Value = client
+        .post(format!("{}/token", service.base))
+        .form(&token_form(&[
+            ("grant_type", GRANT_REFRESH_TOKEN.to_owned()),
+            ("refresh_token", "rt_absent".to_owned()),
+        ]))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body["error"], "unsupported_grant_type", "{body}");
+
+    let bogus: Value = client
+        .post(format!("{}/token", service.base))
+        .form(&token_form(&[("grant_type", "password".to_owned())]))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(bogus["error"], "unsupported_grant_type", "{bogus}");
+}
+
+/// Expiry: an expired refresh token refuses invalid_grant (the peek
+/// checks the clock before anything consumes).
+#[tokio::test]
+async fn refresh_grant_expiry_refuses() {
+    // duration −1: minted already-expired — the expiry branch alone.
+    let service = spawn_service_refresh(Some(RefreshTokenCfg { duration: -1 })).await;
+    let client = reqwest::Client::new();
+
+    let code = mint_pre_auth_code(&service).await;
+    let (token, dpop_key) = redeem_dpop_bound(&service, code).await;
+    let r1 = token["refresh_token"].as_str().unwrap().to_owned();
+
+    let expired = client
+        .post(format!("{}/token", service.base))
+        .header(
+            "DPoP",
+            dpop_proof(&dpop_key, "POST", &token_endpoint_url(), None),
+        )
+        .form(&token_form(&[
+            ("grant_type", GRANT_REFRESH_TOKEN.to_owned()),
+            ("refresh_token", r1),
+        ]))
+        .send()
+        .await
+        .unwrap();
+    let status = expired.status();
+    let body: Value = expired.json().await.unwrap();
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "invalid_grant", "{body}");
+    assert!(
+        body["error_description"]
+            .as_str()
+            .is_some_and(|d| d.contains("expired")),
+        "{body}"
     );
 }

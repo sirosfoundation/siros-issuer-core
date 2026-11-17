@@ -490,6 +490,10 @@ pub fn issuer_identifier(base: &Url) -> String {
 
 pub const GRANT_PRE_AUTHORIZED_CODE: &str = "urn:ietf:params:oauth:grant-type:pre-authorized_code";
 pub const GRANT_AUTHORIZATION_CODE: &str = "authorization_code";
+/// RFC 6749 §6 — the third grant (design §12.1, gap 1): config-gated
+/// per deployment; the AS metadata's `grant_types_supported` advertises
+/// it only when enabled.
+pub const GRANT_REFRESH_TOKEN: &str = "refresh_token";
 
 pub fn authorization_server_metadata(issuer_base: &Url) -> Result<AuthorizationServerMetadata> {
     let join = |path: &str| -> Result<Url> {
@@ -581,6 +585,13 @@ pub struct TokenResponse {
     pub expires_in: i64,
     pub c_nonce: String,
     pub c_nonce_expires_in: i64,
+    /// RFC 6749 §6 (gap 1): present only when the deployment mints
+    /// refresh tokens — at issuance (DPoP-bound sessions; refresh is
+    /// sender-constrained) and single-use-rotated on the refresh grant.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_token_expires_in: Option<i64>,
 }
 
 // ─── Proof and credential (ID1 §7) ───────────────────────────────────────

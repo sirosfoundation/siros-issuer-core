@@ -957,6 +957,34 @@ consent, session machinery), and the v1 design has exactly two modes and no plug
 must survive v2: new auth capability enters as a mode on the existing session state
 machine, never as a parallel path.
 
+**DONE (v0.2 line, gap 1): the `refresh_token` grant — the third grant** (RFC 6749 §6;
+vc's `handleRefreshTokenGrant` semantics, gap-analysis gap 1). A mode on the existing
+session machine, config-gated per deployment: `[authorization.refresh_token] duration =
+<seconds>` — absent ⇒ the grant is off (`unsupported_grant_type` at /token, RFC 6749
+§5.2 — the same honesty class as issue #6: an unknown grant now answers
+`unsupported_grant_type` too, never the misdirecting `invalid_grant`), nothing minted,
+nothing advertised in the AS metadata's `grant_types_supported` (advertised only when
+enabled — never a wider metadata lie, the #4 principle). Present ⇒ DPoP-bound token
+issuances mint a refresh token (sender-constrained to the issuance-time DPoP jkt —
+ARF 3.0 §6.6.6.2.2, vc's posture; a DPoP-free session's token could never be refreshed,
+so none is minted) and the grant rotates it: RFC 6749 §6 single-use with a CAS on the
+old token's hash (memory store: the index move under one lock; Mongo: the filter IS
+the enforcement, `find_one_and_update` on the old hash — a replayed/concurrent rotation
+misses → `invalid_grant`, vc's "already been used"), a fresh `c_nonce` every rotation,
+expiry checked at the peek. The **no-burn ordering property**: the pre-rotation peek
+means a wrong-key/expiry refusal never consumes the token (the same property as the
+auth-code grant's Mode B check); only the CAS rotation consumes. **One documented
+deviation from vc**: vc swaps the session's single Token object (the pre-refresh access
+token dies at rotation); ours lapses at its own TTL — the sender-constraint plus the
+access-token TTL bound the exposure window. Store surface: `set_refresh_token` /
+`peek_by_refresh_token` / `rotate_refresh_token` (the hash is a parallel single-use
+index like the pre-authorized code's, hashed at rest; the record carries hash, expiry,
+and the constraint jkt, all `serde(default)` for stored records). 7 tests: minting
+follows config + binding; metadata advertisement gated; refresh-then-ISSUE on the
+rotated pair (a credential issues against the refreshed token — the session-machine
+proof); single-use with the chained successor; wrong-key no-burn; required-proof
+no-burn; disabled/unknown grants answer `unsupported_grant_type`; expiry.
+
 ### 12.2 Other v2 items
 
 - BBS/JWP issuance — as a ZK-capable format **on** the capability layer (§8.3): a new

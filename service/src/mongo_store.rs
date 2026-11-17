@@ -535,6 +535,71 @@ impl SessionStore for MongoStore {
         Ok(())
     }
 
+    /// Arm a refresh token (initial mint, RFC 6749 §6 / gap 1): the
+    /// hash rides BOTH the parallel top-level index (the CAS filter)
+    /// and the record.
+    async fn set_refresh_token(
+        &self,
+        id: &SessionId,
+        hash: String,
+        expires_unix: i64,
+        dpop_jkt: Option<String>,
+    ) -> Result<()> {
+        self.sessions
+            .update_one(
+                doc! { "_id": id.as_str() },
+                doc! { "$set": {
+                    "refresh_token_hash": &hash,
+                    "record.refresh_token_hash": &hash,
+                    "record.refresh_token_expires_unix": expires_unix,
+                    "record.refresh_dpop_jkt": dpop_jkt,
+                }},
+            )
+            .await
+            .map_err(mongo_error)?;
+        Ok(())
+    }
+
+    /// Read-only lookup by refresh token — the parallel index, never
+    /// consuming (the pre-claim checks run against this copy).
+    async fn peek_by_refresh_token(&self, token: &str) -> Option<SessionRecord> {
+        use sha2::{Digest, Sha256};
+        let hash = hex(&Sha256::digest(token.as_bytes()));
+        self.sessions
+            .find_one(doc! { "refresh_token_hash": &hash })
+            .max_time(OPERATION_TIMEOUT)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|d| record_of(&d).ok())
+    }
+
+    /// RFC 6749 §6 single-use rotation — the CAS filter IS the
+    /// single-use enforcement: a concurrent rotation already moved the
+    /// index, so a replay misses and refuses (`invalid_grant`).
+    async fn rotate_refresh_token(
+        &self,
+        old_token: &str,
+        new_hash: String,
+        new_expires_unix: i64,
+    ) -> Result<()> {
+        use sha2::{Digest, Sha256};
+        let old_hash = hex(&Sha256::digest(old_token.as_bytes()));
+        self.sessions
+            .find_one_and_update(
+                doc! { "refresh_token_hash": &old_hash },
+                doc! { "$set": {
+                    "refresh_token_hash": &new_hash,
+                    "record.refresh_token_hash": &new_hash,
+                    "record.refresh_token_expires_unix": new_expires_unix,
+                }},
+            )
+            .await
+            .map_err(mongo_error)?
+            .ok_or_else(|| Error::invalid_input("refresh token already used or unknown"))?;
+        Ok(())
+    }
+
     async fn find_by_offer_uuid(&self, offer_uuid: &str) -> Option<SessionRecord> {
         self.sessions
             .find_one(doc! { "record.offer_uuid": offer_uuid })

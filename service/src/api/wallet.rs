@@ -16,8 +16,8 @@ use serde_json::{json, Value};
 use siros_issuer_core::oid4vci::{
     CredentialEntry, CredentialMetadata, CredentialOffer, CredentialRequest, CredentialResponse,
     CredentialResponseEncryption, DeferredCredentialRequest, GrantPreAuthorizedCode,
-    NotificationRequest, TokenResponse, GRANT_PRE_AUTHORIZED_CODE, NOTIFICATION_ACCEPTED,
-    NOTIFICATION_DELETED, NOTIFICATION_FAILURE,
+    NotificationRequest, TokenResponse, GRANT_PRE_AUTHORIZED_CODE, GRANT_REFRESH_TOKEN,
+    NOTIFICATION_ACCEPTED, NOTIFICATION_DELETED, NOTIFICATION_FAILURE,
 };
 use siros_issuer_core::response::encrypt_response;
 
@@ -109,6 +109,9 @@ fn oauth_error_code(error: &Error) -> &'static str {
         // expired/consumed-code path).
         siros_issuer_core::error::code::INVALID_CLIENT => "invalid_client",
         siros_issuer_core::error::code::UNSUPPORTED_CREDENTIAL => "unsupported_credential_format",
+        // RFC 6749 §5.2: unknown grants, and the refresh_token grant
+        // when the deployment gate is off (gap 1).
+        siros_issuer_core::error::code::UNSUPPORTED_GRANT_TYPE => "unsupported_grant_type",
         _ => "invalid_request",
     }
 }
@@ -169,10 +172,16 @@ pub async fn credential_issuer_metadata(
 pub async fn oauth_authorization_server(
     State(state): State<AppState>,
 ) -> Json<siros_issuer_core::oid4vci::AuthorizationServerMetadata> {
-    Json(
+    let mut metadata =
         siros_issuer_core::oid4vci::authorization_server_metadata(&state.issuer_base)
-            .expect("a validated issuer base URL cannot fail generation"),
-    )
+            .expect("a validated issuer base URL cannot fail generation");
+    // RFC 8414's grant_types_supported: the third grant (gap 1) is
+    // advertised only when the deployment enables it — never a wider
+    // metadata lie (the #4 principle).
+    if state.refresh_token.is_some() {
+        metadata.grant_types_supported.push(GRANT_REFRESH_TOKEN);
+    }
+    Json(metadata)
 }
 
 /// `GET /.well-known/jwt-vc-issuer` (SD-JWT VC §5.3 issuer metadata):
@@ -536,10 +545,65 @@ pub async fn token(
                 .await
                 .map_err(oauth_err)?
         }
+        GRANT_REFRESH_TOKEN => {
+            // RFC 6749 §6 — the third grant (design §12.1, gap 1),
+            // vc's reference semantics. Config-gated: off ⇒ the
+            // endpoint answers as if the grant did not exist.
+            if state.refresh_token.is_none() {
+                return Err(oauth_err(Error::new(
+                    siros_issuer_core::error::code::UNSUPPORTED_GRANT_TYPE,
+                    "refresh_token grant is not enabled",
+                )));
+            }
+            // The OAuth error shape throughout (RFC 6749 §5.2):
+            // these are grant-level refusals, invalid_grant class.
+            let old = get("refresh_token")
+                .ok_or_else(|| Error::invalid_input("refresh_token is required"))
+                .map_err(oauth_err)?;
+            // Sender-constrained refresh (ARF 3.0 §6.6.6.2.2, vc): the
+            // DPoP proof is REQUIRED and must carry the issuance-time
+            // key.
+            let jkt = dpop
+                .clone()
+                .ok_or_else(|| {
+                    Error::invalid_input("a DPoP proof is required for the refresh_token grant")
+                })
+                .map_err(oauth_err)?;
+            // Peek, never consume: the wrong-key/expiry refusals below
+            // must not burn the token — the CAS rotation after the
+            // match is the only consuming step.
+            let record = state
+                .sessions
+                .peek_by_refresh_token(&old)
+                .await
+                .ok_or_else(|| Error::invalid_input("invalid or expired refresh token"))
+                .map_err(oauth_err)?;
+            if record.refresh_token_expires_unix.unwrap_or_default() < now {
+                return Err(oauth_err(Error::invalid_input("refresh token has expired")));
+            }
+            match &record.refresh_dpop_jkt {
+                Some(stored) if stored == &jkt => {}
+                None => {
+                    return Err(oauth_err(Error::invalid_input(
+                        "refresh token is not bound to a DPoP key",
+                    )))
+                }
+                Some(_) => {
+                    return Err(oauth_err(Error::invalid_input(
+                        "DPoP key does not match the key used at initial token issuance",
+                    )))
+                }
+            }
+            record
+        }
         other => {
-            return Err(oauth_err(Error::invalid_input(format!(
-                "grant_type {other:?} is not supported"
-            ))))
+            // RFC 6749 §5.2: an unknown grant answers
+            // unsupported_grant_type — never the misdirecting
+            // invalid_grant (the same honesty fix as issue #6's class).
+            return Err(oauth_err(Error::new(
+                siros_issuer_core::error::code::UNSUPPORTED_GRANT_TYPE,
+                format!("grant_type {other:?} is not supported"),
+            )));
         }
     };
 
@@ -552,7 +616,9 @@ pub async fn token(
             hex_of(&access_token),
             &record.id,
             now + state.access_token_ttl_seconds,
-            dpop,
+            // Cloned, not moved: the refresh-token mint below reads the
+            // binding jkt.
+            dpop.clone(),
         )
         .await
         .map_err(oauth_err)?;
@@ -562,12 +628,50 @@ pub async fn token(
         .await
         .map_err(oauth_err)?;
 
+    // RFC 6749 §6 (gap 1): the refresh token. Minted at issuance when
+    // the deployment enables it AND the access token is DPoP-bound —
+    // refresh is sender-constrained, so a token minted on a DPoP-free
+    // session could never be used and is never issued. Single-use
+    // rotated on the refresh grant: the CAS on the old hash refuses a
+    // replay (invalid_grant, "already used" — vc's wording).
+    let (refresh_token, refresh_token_expires_in) = match state.refresh_token.as_ref() {
+        None => (None, None),
+        Some(cfg) => {
+            let expires = now + cfg.duration;
+            if grant_type == GRANT_REFRESH_TOKEN {
+                let old =
+                    get("refresh_token").expect("the refresh grant arm validated the parameter");
+                let rotated = random_handle("rt_", 32);
+                state
+                    .sessions
+                    .rotate_refresh_token(&old, hex_of(&rotated), expires)
+                    .await
+                    .map_err(oauth_err)?;
+                (Some(rotated), Some(cfg.duration))
+            } else if dpop.is_some() {
+                let minted = random_handle("rt_", 32);
+                state
+                    .sessions
+                    .set_refresh_token(&record.id, hex_of(&minted), expires, dpop.clone())
+                    .await
+                    .map_err(oauth_err)?;
+                (Some(minted), Some(cfg.duration))
+            } else {
+                // DPoP-free issuance (the plain pre-authorized posture):
+                // no refresh token — it would be unusable by design.
+                (None, None)
+            }
+        }
+    };
+
     Ok(Json(TokenResponse {
         access_token,
         token_type: "Bearer",
         expires_in: state.access_token_ttl_seconds,
         c_nonce,
         c_nonce_expires_in: state.c_nonce_ttl_seconds,
+        refresh_token,
+        refresh_token_expires_in,
     }))
 }
 
@@ -1368,6 +1472,9 @@ async fn par_inner(
         revoked: false,
         created_at_unix: now,
         expires_at_unix: now + 3600,
+        refresh_token_hash: None,
+        refresh_token_expires_unix: None,
+        refresh_dpop_jkt: None,
         history: vec![(now, "awaiting_authorization".to_owned())],
     };
     state

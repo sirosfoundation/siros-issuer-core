@@ -28,6 +28,10 @@ pub mod code {
     pub const CONFIGURATION: &str = "configuration";
     pub const CATALOG_INVALID: &str = "catalog_invalid";
     pub const UNSUPPORTED_CREDENTIAL: &str = "unsupported_credential";
+    /// The grant_type is not one this deployment speaks (RFC 6749 §5.2
+    /// `unsupported_grant_type`): unknown grant URNs, and the
+    /// refresh_token grant when its config gate is off (gap 1).
+    pub const UNSUPPORTED_GRANT_TYPE: &str = "unsupported_grant_type";
     pub const ILLEGAL_TRANSITION: &str = "illegal_transition";
     pub const PDP_DENIED: &str = "pdp_denied";
     pub const PDP_UNAVAILABLE: &str = "pdp_unavailable";

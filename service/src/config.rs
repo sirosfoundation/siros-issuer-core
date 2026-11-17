@@ -88,6 +88,25 @@ pub struct AuthorizationCfg {
     /// grant never relaxes (its client was authenticated at PAR).
     #[serde(default)]
     pub pre_authorized_client_auth: PreAuthorizedClientAuth,
+    /// RFC 6749 §6 refresh tokens (design §12.1's third grant, gap 1):
+    /// absent ⇒ the refresh_token grant is OFF — `unsupported_grant_type`
+    /// at /token, no refresh token minted, nothing advertised in the AS
+    /// metadata (every existing deployment unchanged). Present ⇒
+    /// enabled: DPoP-bound token issuances mint a refresh token
+    /// (sender-constrained to the issuance-time key — ARF 3.0
+    /// §6.6.6.2.2, vc's posture; an unbound session's token could never
+    /// be refreshed, so none is minted) and the grant rotates it
+    /// single-use.
+    #[serde(default)]
+    pub refresh_token: Option<RefreshTokenCfg>,
+}
+
+/// The refresh-token grant's deployment configuration (gap 1).
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RefreshTokenCfg {
+    /// Seconds a refresh token lives; each rotation extends it.
+    pub duration: i64,
 }
 
 /// The pre-authorized grant's client-auth posture (issue #6).

@@ -170,6 +170,10 @@ pub struct AppState {
     pub credential_validity_seconds: i64,
     pub access_token_ttl_seconds: i64,
     pub c_nonce_ttl_seconds: i64,
+    /// RFC 6749 §6 refresh tokens (gap 1, design §12.1's third grant):
+    /// None ⇒ the grant is off — `unsupported_grant_type` at /token,
+    /// nothing minted, nothing advertised in the AS metadata.
+    pub refresh_token: Option<crate::config::RefreshTokenCfg>,
     /// ZK rulebooks (design §8.3 item 5): name → bundle. General data —
     /// issuance resolves the one bundle governing the session's
     /// credential (startup validation guarantees uniqueness).

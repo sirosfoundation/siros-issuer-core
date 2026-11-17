@@ -124,6 +124,7 @@ after flow-core's P-bw1–P-bw3 + notify + the carriers.
 ## The gap list (the actual deltas)
 
 1. **`refresh_token` grant** — vc has it (DPoP-bound, RFC 6749 §6); ours has neither code nor an explicit v2 line item. → Add to §12.1 as the third-grant item (a mode on the session machine); OIDF wallet-plan coverage exists for the oracle.
+   **CLOSED (2026-11-17): implemented** — `[authorization.refresh_token] duration`, vc's semantics (sender-constrained to the issuance-time DPoP jkt, single-use CAS rotation, c_nonce rotation, no-burn ordering, `unsupported_grant_type` when off); §12.1 carries the item and the one documented deviation (the pre-refresh access token lapses at its TTL rather than dying at rotation, as vc's cache swap does). 7 tests; the wallet-plan refresh module remains the future oracle.
 2. **CWT status lists for mdoc** — vc produces both JWT and CWT lists; our local list and status-service contract are JWT-only. The ARF form for mdoc. → v2 status item; `StatusRef` already carries it; the work is the CWT producer + the verifier-core read side.
 3. **ARF `disclosure_policy` metadata member** — vc embeds `disclosure_policy` (authorized-relying-parties / specific-root-of-trust) in issuer metadata; ours cannot (the suite schema's `unevaluatedProperties:false` warns it). → Needs an ARF-conformance decision: extension member + suite-schema check, or accept the warning. Small, deliberate-todo.
 4. **TSL checking** — vc plans it as a trust-input hardening; no story on ours. → triage toward go-trust (a registry), not the issuer.

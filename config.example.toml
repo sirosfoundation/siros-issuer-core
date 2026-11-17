@@ -167,6 +167,16 @@ challenge_per_minute = 20   # POST authorization-challenge (+ Mode B response)
 #   authorization_code grant never relaxes.
 # pre_authorized_client_auth = "required"
 
+# ── RFC 6749 §6: the refresh_token grant (design §12.1's third grant) ──
+# Absent (the default) ⇒ the grant is OFF: /token answers
+# unsupported_grant_type, no refresh token is minted, nothing is
+# advertised in the AS metadata. Present ⇒ enabled: DPoP-bound token
+# issuances mint a single-use refresh token (sender-constrained to the
+# issuance-time DPoP key — a DPoP-free session never gets one) and the
+# grant rotates it per refresh (RFC 6749 §6).
+# [authorization.refresh_token]
+# duration = 86400   # seconds; each rotation extends it
+
 # ── Pre-auth strong binding (design §6.5 v2) ──────────────────────────────
 # Present ⇒ the pre-authorized grant demands a PID presentation before
 # token issuance (vc's PrepareIssuance.identity_match semantics: the

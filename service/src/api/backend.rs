@@ -271,6 +271,9 @@ pub async fn create_session(
         revoked: false,
         created_at_unix: now,
         expires_at_unix: now + ttl,
+        refresh_token_hash: None,
+        refresh_token_expires_unix: None,
+        refresh_dpop_jkt: None,
         history: vec![(now, binding_state.label().to_owned())],
     };
     state.sessions.insert(record).await.map_err(api_error)?;
