@@ -136,8 +136,24 @@ fn proof_types_follow_the_format() {
     assert!(!sdjwt.proof_types_supported.contains_key("attestation"));
 
     let mdoc = &metadata.credential_configurations_supported["eu.europa.ec.eudi.pid.1"];
+    // mso_mdoc advertises BOTH proof types (issue #4): the `jwt` proof
+    // wallet engines plan from this metadata (the endpoint's proof
+    // verification is format-agnostic — a JWK-bound jwt proof delivers
+    // the device key the credential binds as a COSE Key) AND the
+    // `attestation` proof (Appendix D.1). Attestation-only metadata is
+    // the mid-flow refusal engines make (WMP -31005 "Capability not
+    // supported", proven live on the realeyes demo).
     assert!(mdoc.proof_types_supported.contains_key("attestation"));
-    assert!(!mdoc.proof_types_supported.contains_key("jwt"));
+    assert!(mdoc.proof_types_supported.contains_key("jwt"));
+    // Each entry carries the algs the endpoint actually accepts —
+    // ES256, never the wider set other issuers advertise (a metadata
+    // lie is its own bug class, the #3 lesson).
+    for proof_type in ["jwt", "attestation"] {
+        assert_eq!(
+            mdoc.proof_types_supported[proof_type].proof_signing_alg_values_supported,
+            vec!["ES256"]
+        );
+    }
     // mdoc signing algs are COSE integer ids, not JWS names.
     assert_eq!(mdoc.credential_signing_alg_values_supported, json!([-7]));
 }

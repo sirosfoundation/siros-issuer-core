@@ -403,12 +403,31 @@ fn mdoc_configuration(
             name: credential.label.clone(),
             locale: None,
         }],
-        proof_types_supported: BTreeMap::from([(
-            "attestation",
-            ProofType {
-                proof_signing_alg_values_supported: vec!["ES256"],
-            },
-        )]),
+        // Both proof types, each with the algs the endpoint's proof
+        // path ACTUALLY accepts (ES256, and never a wider set — a
+        // metadata lie is its own bug class, the #3 lesson). The `jwt`
+        // proof is what wallet engines plan from this metadata (the
+        // credential endpoint's proof verification is format-agnostic:
+        // a JWK-bound jwt proof delivers the same device key the mdoc
+        // credential binds as a COSE Key); the `attestation` proof is
+        // the attested-key path (Appendix D.1). Attestation-only
+        // metadata makes engines that plan proofs refuse the offer
+        // mid-flow (WMP -31005 "Capability not supported", proven live
+        // on the realeyes demo — issue #4).
+        proof_types_supported: BTreeMap::from([
+            (
+                "jwt",
+                ProofType {
+                    proof_signing_alg_values_supported: vec!["ES256"],
+                },
+            ),
+            (
+                "attestation",
+                ProofType {
+                    proof_signing_alg_values_supported: vec!["ES256"],
+                },
+            ),
+        ]),
         // mdoc signs with COSE algorithm ids: -7 = ES256.
         credential_signing_alg_values_supported: serde_json::json!([-7]),
         auxiliary_data_supported: auxiliary_data.cloned(),
