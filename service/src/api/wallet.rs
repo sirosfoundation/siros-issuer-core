@@ -139,6 +139,8 @@ pub async fn credential_issuer_metadata(
         // The deployment's own posture (issue #21): the announced
         // truth, enforced at the endpoint.
         state.response_encryption_required,
+        // The draft-era shim flag: the per-credential copy.
+        state.response_encryption_per_credential,
     )
     .expect("a validated issuer base URL and catalog cannot fail generation");
 

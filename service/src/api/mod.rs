@@ -180,6 +180,10 @@ pub struct AppState {
     /// false opts out. A to_wallet opening is refused in the clear
     /// EITHER way.
     pub response_encryption_required: bool,
+    /// The draft-era per-credential copy of the response-encryption
+    /// member (issue #21's engine-reader shim): off by default (the
+    /// conformance schema rejects the per-credential member).
+    pub response_encryption_per_credential: bool,
     /// ZK rulebooks (design §8.3 item 5): name → bundle. General data —
     /// issuance resolves the one bundle governing the session's
     /// credential (startup validation guarantees uniqueness).

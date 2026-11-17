@@ -60,6 +60,8 @@ fn catalog_drives_metadata_and_configuration_ids() {
         &std::collections::BTreeMap::new(),
         // The default posture (issue #21): required.
         true,
+        // The shim: OFF by default (the conformance shape).
+        false,
     )
     .unwrap();
 
@@ -134,6 +136,8 @@ fn proof_types_follow_the_format() {
         &std::collections::BTreeMap::new(),
         // The default posture (issue #21): required.
         true,
+        // The shim: OFF by default (the conformance shape).
+        false,
     )
     .unwrap();
 
@@ -242,6 +246,8 @@ fn session_api_identifiers_match_configuration_ids() {
         &std::collections::BTreeMap::new(),
         // The default posture (issue #21): required.
         true,
+        // The shim: OFF by default (the conformance shape).
+        false,
     )
     .unwrap();
     for configuration_id in metadata.credential_configurations_supported.keys() {
@@ -273,6 +279,8 @@ fn credential_request_encryption_carries_only_final_schema_members() {
         &std::collections::BTreeMap::new(),
         // The default posture (issue #21): required.
         true,
+        // The shim: OFF by default (the conformance shape).
+        false,
     )
     .unwrap();
     let cre = metadata.credential_request_encryption.expect("declared");
@@ -289,4 +297,57 @@ fn credential_request_encryption_carries_only_final_schema_members() {
     );
     // RFC 7517: the private member never leaves the server.
     assert!(object["jwks"]["keys"][0].get("d").is_none());
+}
+
+/// The draft-era shim (issue #21's engine reader): with the flag ON,
+/// EVERY credential configuration carries the per-credential
+/// `credential_response_encryption` mirroring the issuer-level member
+/// verbatim — the shape the pre-Final wallet engines read (their
+/// per-credential reader parses an EMPTY config against the
+/// issuer-level-only publication and refuses with "no mutually
+/// supported alg/enc pair"). OFF: absent (the conformance schema's
+/// additionalProperties: false rejects the member).
+#[test]
+fn per_credential_response_encryption_shim_mirrors_the_issuer_level_member() {
+    let (_, documents) = fixtures();
+    let catalog = build_catalog(documents).unwrap();
+    let issuer_base = issuer_base();
+    // ON: every configuration carries the copy.
+    let metadata = metadata_from_catalog(
+        &issuer_base,
+        &catalog,
+        vec![],
+        &EndpointPaths::default(),
+        &std::collections::BTreeMap::new(),
+        true,
+        true,
+    )
+    .unwrap();
+    assert!(!metadata.credential_configurations_supported.is_empty());
+    for (id, configuration) in &metadata.credential_configurations_supported {
+        let copy = configuration
+            .credential_response_encryption
+            .as_ref()
+            .unwrap_or_else(|| panic!("the copy rides {id}"));
+        assert_eq!(copy.alg_values_supported, vec!["ECDH-ES"]);
+        assert_eq!(copy.enc_values_supported, vec!["A128GCM"]);
+        assert!(copy.encryption_required, "mirrors the issuer-level flag");
+    }
+    // OFF: absent on every configuration (the conformance shape).
+    let metadata = metadata_from_catalog(
+        &issuer_base,
+        &catalog,
+        vec![],
+        &EndpointPaths::default(),
+        &std::collections::BTreeMap::new(),
+        true,
+        false,
+    )
+    .unwrap();
+    for configuration in metadata.credential_configurations_supported.values() {
+        assert!(
+            configuration.credential_response_encryption.is_none(),
+            "the shim is absent when the flag is off"
+        );
+    }
 }

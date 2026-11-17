@@ -186,6 +186,16 @@ challenge_per_minute = 20   # POST authorization-challenge (+ Mode B response)
 # refused in the clear EITHER way (endpoint-enforced).
 # [issuer]
 # response_encryption_required = true
+# The draft-era interop shim (issue #21's engine readers, e.g.
+# siros-wallet-core pre-#53): copy credential_response_encryption into
+# each credential_configurations_supported entry. Some wallet engines
+# read the member PER-CREDENTIAL (the pre-Final shape) and parse an
+# EMPTY config against the issuer-level-only publication ("no mutually
+# supported alg/enc pair"). Default OFF — the conformance schema
+# (additionalProperties: false) rejects the per-credential member;
+# turn ON for engine fleets that need it, retire when the engines read
+# the issuer-level member.
+# response_encryption_per_credential = false
 
 # ── Pre-auth strong binding (design §6.5 v2) ──────────────────────────────
 # Present ⇒ the pre-authorized grant demands a PID presentation before

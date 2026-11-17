@@ -112,6 +112,17 @@ pub struct AuxiliaryDataWireEntry {
 #[serde(rename_all = "snake_case")]
 pub struct CredentialConfiguration {
     pub format: &'static str,
+    /// The DRAFT-ERA per-credential copy of `credential_response_encryption`
+    /// (the pre-Final shape some wallet engines still read
+    /// per-configuration — siros-wallet-core #53's reader). Final
+    /// §12.2.4 puts the member at the issuer level; this copy is an
+    /// INTEROP SHIM, config-gated (`[issuer]
+    /// response_encryption_per_credential`), mirroring the issuer-level
+    /// values verbatim, and retires when the engines read the
+    /// issuer-level member. Absent (None) on the conformance profile —
+    /// the schema's additionalProperties is false there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_response_encryption: Option<IssuerResponseEncryption>,
     /// dc+sd-jwt only: the vct is a bare member of the configuration
     /// (OID4VCI 1.0 Final §12.2.4 — the draft-era credential_definition
     /// wrapper is gone; the conformance schema enforces this).
@@ -185,7 +196,7 @@ pub struct ResponseEncryption {
 }
 
 /// Final §12.2.4 issuer-level member (all three sub-members required).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct IssuerResponseEncryption {
     pub alg_values_supported: Vec<&'static str>,
@@ -255,6 +266,7 @@ pub fn metadata_from_catalog(
     paths: &EndpointPaths,
     auxiliary_data_plans: &BTreeMap<String, AuxiliaryDataSupported>,
     encryption_required: bool,
+    response_encryption_per_credential: bool,
 ) -> Result<CredentialIssuerMetadata> {
     let credential_request_encryption = paths.request_encryption_jwk.as_ref().map(|jwk| {
         // Publish the PUBLIC members only: `d` never leaves the
@@ -274,6 +286,21 @@ pub fn metadata_from_catalog(
         issuer_base
             .join(path)
             .map_err(|e| crate::error::Error::configuration(format!("issuer base URL: {e}")))
+    };
+
+    // The issuer-level member (built once — the per-credential shim
+    // mirrors it verbatim).
+    let response_encryption = IssuerResponseEncryption {
+        alg_values_supported: vec!["ECDH-ES"],
+        enc_values_supported: vec!["A128GCM"],
+        // The deployment's own posture (issue #21): the issuer
+        // announces and REQUIRES encrypted responses by default
+        // (the service config — default true), opts out only
+        // explicitly, and NEVER opts out of a to_wallet secret
+        // delivery (the endpoint-enforced secrets rule). Wallets key
+        // their S2 negotiation on this member — it advertises the
+        // truth the endpoint enforces.
+        encryption_required,
     };
 
     let mut configurations = BTreeMap::new();
@@ -306,8 +333,19 @@ pub fn metadata_from_catalog(
             }
         }
         let configuration = match credential.format.as_str() {
-            SD_JWT_FORMAT => sd_jwt_configuration(credential, auxiliary_data),
-            MDOC_FORMAT => mdoc_configuration(credential, auxiliary_data),
+            SD_JWT_FORMAT => sd_jwt_configuration(
+                credential,
+                auxiliary_data,
+                // The draft-era shim (issue #21's engine reader):
+                // the issuer-level member copied per-credential when
+                // the deployment gates it on.
+                response_encryption_per_credential.then(|| response_encryption.clone()),
+            ),
+            MDOC_FORMAT => mdoc_configuration(
+                credential,
+                auxiliary_data,
+                response_encryption_per_credential.then(|| response_encryption.clone()),
+            ),
             // Unreachable: the match above filtered to these two.
             _ => unreachable!("the format was just filtered"),
         };
@@ -335,19 +373,7 @@ pub fn metadata_from_catalog(
         // route remains an unadvertised alias for wallets that prefer it.
         nonce_endpoint: paths.nonce.map(join).transpose()?,
         notification_endpoint: paths.notification.map(join).transpose()?,
-        credential_response_encryption: IssuerResponseEncryption {
-            alg_values_supported: vec!["ECDH-ES"],
-            enc_values_supported: vec!["A128GCM"],
-            // The deployment's own posture (issue #21): the issuer
-            // announces and REQUIRES encrypted responses by default
-            // (the service config — default true), opts out only
-            // explicitly, and NEVER opts out of a to_wallet secret
-            // delivery (api::validate_response_encryption refuses the
-            // config at startup). Wallets key their S2 negotiation on
-            // this member — it advertises the truth the endpoint
-            // enforces.
-            encryption_required,
-        },
+        credential_response_encryption: response_encryption,
         credential_request_encryption,
         credential_configurations_supported: configurations,
         batch_credential_issuance: paths
@@ -359,9 +385,11 @@ pub fn metadata_from_catalog(
 fn sd_jwt_configuration(
     credential: &CredentialType,
     auxiliary_data: Option<&AuxiliaryDataSupported>,
+    response_encryption_shim: Option<IssuerResponseEncryption>,
 ) -> CredentialConfiguration {
     CredentialConfiguration {
         format: SD_JWT_FORMAT,
+        credential_response_encryption: response_encryption_shim,
         vct: Some(credential.identifier.clone()),
         doctype: None,
         claims: Some(
@@ -394,9 +422,11 @@ fn sd_jwt_configuration(
 fn mdoc_configuration(
     credential: &CredentialType,
     auxiliary_data: Option<&AuxiliaryDataSupported>,
+    response_encryption_shim: Option<IssuerResponseEncryption>,
 ) -> CredentialConfiguration {
     CredentialConfiguration {
         format: MDOC_FORMAT,
+        credential_response_encryption: response_encryption_shim,
         vct: None,
         doctype: Some(credential.identifier.clone()),
         // No `claims` member for mso_mdoc: the conformance suite's

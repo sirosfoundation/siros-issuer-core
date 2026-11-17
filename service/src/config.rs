@@ -418,6 +418,19 @@ pub struct IssuerCfg {
     /// never crosses the wire in the clear, whatever the knob says.
     #[serde(default = "default_true")]
     pub response_encryption_required: bool,
+    /// The draft-era interop shim (issue #21's engine reader,
+    /// siros-wallet-core #53): copy `credential_response_encryption`
+    /// into each `credential_configurations_supported` entry — some
+    /// wallet engines still read the member per-credential (the
+    /// pre-Final shape) and parse an EMPTY config against the
+    /// issuer-level-only publication, refusing with "no mutually
+    /// supported alg/enc pair". The copy mirrors the issuer-level
+    /// values verbatim. Default OFF: the conformance profile's schema
+    /// (additionalProperties: false) rejects the per-credential member;
+    /// turn ON only for engine fleets that need it, and retire when
+    /// the engines read the issuer-level member (wallet-core #53).
+    #[serde(default)]
+    pub response_encryption_per_credential: bool,
     /// Local-test-only: allow plain-HTTP non-loopback URLs (the conformance
     /// compose network). The verifier-core conformance fixtures carry the
     /// same escape hatch (allow_invalid_status_list_certificates). Never
