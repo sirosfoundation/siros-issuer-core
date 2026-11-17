@@ -4894,3 +4894,140 @@ async fn array_form_aud_assertion_verifies() {
         "the array-aud assertion verifies: {token}"
     );
 }
+
+// ─── Issue #19: the token_type announcement and the DPoP scheme ──────────
+
+/// RFC 9449 §4.3: a DPoP-bound access token is announced `DPoP` — the
+/// value engines branch on (siros-wallet-core sends Bearer-with-no-
+/// proof for "Bearer", and the issuer's own enforcement then refuses).
+/// A plain token still announces Bearer.
+#[tokio::test]
+async fn token_type_announces_what_was_minted() {
+    let allocator = Arc::new(RecordingAllocator {
+        list_url: Url::parse("http://127.0.0.1:9/lists/test-list").unwrap(),
+        next_index: AtomicU64::new(7),
+        updates: Mutex::new(Vec::new()),
+    });
+    let service = spawn_service(Arc::new(PermitPdp), allocator, test_signer()).await;
+    let client = reqwest::Client::new();
+
+    // DPoP-bound: the proof in the token request constrains the token.
+    let code = mint_pre_auth_code(&service).await;
+    let (token, _key) = redeem_dpop_bound(&service, code).await;
+    assert_eq!(
+        token["token_type"], "DPoP",
+        "a DPoP-bound token announces DPoP (RFC 9449 §4.3): {token}"
+    );
+
+    // Plain: no proof, no binding — Bearer.
+    let code = mint_pre_auth_code(&service).await;
+    let plain: Value = client
+        .post(format!("{}/token", service.base))
+        .form(&token_form(&[
+            ("grant_type", GRANT_PRE_AUTHORIZED_CODE.to_owned()),
+            ("pre_authorized_code", code),
+        ]))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(plain["token_type"], "Bearer", "{plain}");
+}
+
+/// The refreshed token announces DPoP too — the rotation re-binds to
+/// the same key, and the response says so.
+#[tokio::test]
+async fn refresh_grant_announces_dpop() {
+    let service = spawn_service_refresh(Some(RefreshTokenCfg { duration: 3600 })).await;
+    let client = reqwest::Client::new();
+    let code = mint_pre_auth_code(&service).await;
+    let (token, dpop_key) = redeem_dpop_bound(&service, code).await;
+    let r1 = token["refresh_token"].as_str().unwrap().to_owned();
+
+    let refreshed: Value = client
+        .post(format!("{}/token", service.base))
+        .header(
+            "DPoP",
+            dpop_proof(&dpop_key, "POST", &token_endpoint_url(), None),
+        )
+        .form(&token_form(&[
+            ("grant_type", GRANT_REFRESH_TOKEN.to_owned()),
+            ("refresh_token", r1),
+        ]))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        refreshed["token_type"], "DPoP",
+        "the refreshed token is DPoP-bound: {refreshed}"
+    );
+}
+
+/// The engine's exact shape (issue #19's tcpdump, corrected): a
+/// DPoP-announced token rides `Authorization: DPoP <token>` with the
+/// ath-bound proof — and the credential endpoint accepts the scheme
+/// it announced. The Bearer scheme with a proof (the suite's and our
+/// older tests' shape) keeps working: both are legal for the bound
+/// token, the announcement tells the client which to use.
+#[tokio::test]
+async fn credential_endpoint_accepts_the_dpop_scheme() {
+    let allocator = Arc::new(RecordingAllocator {
+        list_url: Url::parse("http://127.0.0.1:9/lists/test-list").unwrap(),
+        next_index: AtomicU64::new(7),
+        updates: Mutex::new(Vec::new()),
+    });
+    let service = spawn_service(Arc::new(PermitPdp), allocator, test_signer()).await;
+    let client = reqwest::Client::new();
+
+    let code = mint_pre_auth_code(&service).await;
+    let (token, dpop_key) = redeem_dpop_bound(&service, code).await;
+    let access_token = token["access_token"].as_str().unwrap().to_owned();
+
+    let nonce: Value = client
+        .post(format!("{}/nonce", service.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let holder = ec_key();
+    let proof = proof_jwt(
+        &holder,
+        &Url::parse(ISSUER_BASE).unwrap(),
+        nonce["c_nonce"].as_str().unwrap(),
+    );
+    let credential: Value = client
+        .post(format!("{}/credential", service.base))
+        .header("Authorization", format!("DPoP {access_token}"))
+        .header(
+            "DPoP",
+            dpop_proof(
+                &dpop_key,
+                "POST",
+                &credential_endpoint_url(),
+                Some(&siros_issuer_service::dpop::access_token_hash(
+                    &access_token,
+                )),
+            ),
+        )
+        .json(&json!({
+            "credential_configuration_id": "urn:eudi:pid:1",
+            "proof": { "proof_type": "jwt", "jwt": proof },
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        credential["credentials"][0]["credential"].is_string(),
+        "the DPoP scheme rides the credential request: {credential}"
+    );
+}

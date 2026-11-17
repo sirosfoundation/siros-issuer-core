@@ -668,7 +668,13 @@ pub async fn token(
 
     Ok(Json(TokenResponse {
         access_token,
-        token_type: "Bearer",
+        // RFC 9449 §4.3 (issue #19): a DPoP-bound access token is of
+        // type DPoP — the client MUST use the DPoP authentication
+        // scheme for it. Announce what was minted: engines branch on
+        // this value (siros-wallet-core sends Bearer-with-no-proof for
+        // "Bearer", and the issuer's own enforcement then refuses the
+        // binding it never announced).
+        token_type: if dpop.is_some() { "DPoP" } else { "Bearer" },
         expires_in: state.access_token_ttl_seconds,
         c_nonce,
         c_nonce_expires_in: state.c_nonce_ttl_seconds,
@@ -754,8 +760,11 @@ async fn credential_inner(
     headers: HeaderMap,
     request: CredentialRequest,
 ) -> HandlerResult<Response> {
-    let token_hash = bearer_token_hash(&headers)
-        .ok_or_else(|| err(Error::invalid_input("missing Bearer access token")))?;
+    let token_hash = bearer_token_hash(&headers).ok_or_else(|| {
+        err(Error::invalid_input(
+            "missing access token (Authorization: Bearer or DPoP)",
+        ))
+    })?;
     let now = now_unix();
     let (session_id, dpop_jkt) = state
         .sessions
@@ -1132,12 +1141,22 @@ pub async fn notification(
     }
 }
 
-fn bearer_token_hash(headers: &HeaderMap) -> Option<String> {
-    let token = headers
+/// The access token out of the Authorization header, either scheme:
+/// RFC 9449 §4.3 (issue #19) — the client uses the DPoP scheme for a
+/// DPoP-bound token (`Authorization: DPoP <token>` + the DPoP proof
+/// header); a Bearer-announced token rides Bearer. The issuer
+/// announced which at /token and accepts both here.
+fn authorization_access_token(headers: &HeaderMap) -> Option<&str> {
+    let value = headers
         .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())?
-        .strip_prefix("Bearer ")?;
-    Some(hex_of(token))
+        .and_then(|v| v.to_str().ok())?;
+    value
+        .strip_prefix("Bearer ")
+        .or_else(|| value.strip_prefix("DPoP "))
+}
+
+fn bearer_token_hash(headers: &HeaderMap) -> Option<String> {
+    Some(hex_of(authorization_access_token(headers)?))
 }
 
 fn hex_of(value: &str) -> String {
@@ -1168,11 +1187,7 @@ fn enforce_sender_constrained_token(
                 "DPoP proof required for this access token",
             ))
         })?;
-    let access_token = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or_default();
+    let access_token = authorization_access_token(headers).unwrap_or_default();
     let ath = crate::dpop::access_token_hash(access_token);
     let htu = state
         .issuer_base
@@ -1246,8 +1261,11 @@ pub async fn deferred_credential(
     // second. The deferred request rides the SAME access token as the
     // initial one (Final §9), so the binding enforced here is the
     // token's.
-    let token_hash = bearer_token_hash(&headers)
-        .ok_or_else(|| err(Error::invalid_input("missing Bearer access token")))?;
+    let token_hash = bearer_token_hash(&headers).ok_or_else(|| {
+        err(Error::invalid_input(
+            "missing access token (Authorization: Bearer or DPoP)",
+        ))
+    })?;
     let (session_id, dpop_jkt) = state
         .sessions
         .session_by_access_token(&token_hash, now)
