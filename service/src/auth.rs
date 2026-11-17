@@ -34,6 +34,26 @@ pub(crate) fn aud_strings(claims: &Value) -> Vec<&str> {
     }
 }
 
+/// `claims.aud` contains `expected` (either RFC 7519 encoding — issue
+/// #10): the one shared `aud` check, `what` names the artifact in the
+/// refusal.
+pub(crate) fn require_aud(claims: &Value, expected: &str, what: &str) -> Result<()> {
+    let auds = aud_strings(claims);
+    if auds.is_empty() {
+        return Err(Error::new(
+            code::INVALID_INPUT,
+            format!("{what} has no aud"),
+        ));
+    }
+    if !auds.contains(&expected) {
+        return Err(Error::new(
+            code::INVALID_INPUT,
+            format!("{what} aud mismatch"),
+        ));
+    }
+    Ok(())
+}
+
 pub struct IntegratorIdentity {
     /// The integrator's ENTITY identity — the assertion's `iss` — what
     /// an entity-keyed trust registry (go-trust's whitelist: URL lists
@@ -95,14 +115,11 @@ pub fn verify_bearer_assertion(
     // §12.2.3 byte-identity: the identifier carries no empty-path slash
     // (`Url`'s Display would add one), and assertions are signed with the
     // configured form. `aud` in either RFC 7519 encoding (issue #10).
-    let expected = siros_issuer_core::oid4vci::issuer_identifier(expected_aud);
-    let auds = aud_strings(&claims);
-    if auds.is_empty() {
-        return Err(Error::new(code::INVALID_INPUT, "assertion has no aud"));
-    }
-    if !auds.contains(&expected.as_str()) {
-        return Err(Error::new(code::INVALID_INPUT, "assertion aud mismatch"));
-    }
+    require_aud(
+        &claims,
+        &siros_issuer_core::oid4vci::issuer_identifier(expected_aud),
+        "assertion",
+    )?;
     let iss = claims
         .get("iss")
         .and_then(Value::as_str)
@@ -202,14 +219,11 @@ pub fn verify_jwt_proof(
     let claims: Value = serde_json::from_slice(&payload)
         .map_err(|e| Error::new(code::INVALID_INPUT, format!("proof claims: {e}")))?;
     // `aud` in either RFC 7519 encoding (issue #10).
-    let expected = siros_issuer_core::oid4vci::issuer_identifier(expected_aud);
-    let auds = aud_strings(&claims);
-    if auds.is_empty() {
-        return Err(Error::new(code::INVALID_INPUT, "proof has no aud"));
-    }
-    if !auds.contains(&expected.as_str()) {
-        return Err(Error::new(code::INVALID_INPUT, "proof aud mismatch"));
-    }
+    require_aud(
+        &claims,
+        &siros_issuer_core::oid4vci::issuer_identifier(expected_aud),
+        "proof",
+    )?;
     let nonce = claims
         .get("nonce")
         .and_then(Value::as_str)
