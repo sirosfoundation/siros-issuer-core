@@ -1,0 +1,73 @@
+name: Publish GHCR image
+
+# The issuer's registry image (the siros-verifier-core line's twin, on
+# the same shared docker-build-push.yml). The issuer ships as SOURCE
+# today — every deployment builds the repo's Dockerfile locally
+# (realeyes pins bare local tags) — this makes the release image a
+# first-class registry artifact instead:
+#
+# - on tags (v*): ghcr.io/sirosfoundation/siros-issuer-core:vX.Y.Z +
+#   latest (the standard metadata policy), linux/amd64 + linux/arm64,
+#   pushed with the job's GITHUB_TOKEN (packages: write — no secret, no
+#   OIDC npm-style bootstrap needed, ghcr trusts the repo identity) and
+#   cosign-SBOM-signed by the shared workflow.
+# - the digest is attached to the release (image-digest.txt, the
+#   verifier release.yml's shape) so a deployment pins
+#   ghcr.io/sirosfoundation/siros-issuer-core@sha256:… rather than a
+#   movable tag.
+#
+# NOT on main pushes: the image follows releases, not commits — a
+# moving `latest` from main would race the release tags (the
+# certification ZIPs ride tags too). CI's docker job already gates
+# every push's buildability.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The release tag (e.g. v0.1.1) whose image to publish"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  docker:
+    name: Build and publish GHCR image
+    uses: sirosfoundation/.github/.github/workflows/docker-build-push.yml@e9052f30ef341824ced5172cbc14f0eaeb97294c # main (cosign v3 SBOM signing + container-SBOM signature, sirosfoundation/.github#39, #40)
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+    with:
+      image-name: sirosfoundation/siros-issuer-core
+      dockerfile: ./Dockerfile
+      custom-ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+    outputs:
+      digest: ${{ jobs.docker.outputs.digest }}
+
+  digest:
+    name: Attach the image digest to the release
+    needs: docker
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Write and upload image-digest.txt
+        run: |
+          printf 'ghcr.io/sirosfoundation/siros-issuer-core@%s\n' '${{ needs.docker.outputs.digest }}' > image-digest.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-digest
+          path: image-digest.txt
+      # github.token (contents: write on this job) attaches the digest
+      # to the tag's release — the verifier release.yml's shape.
+      - name: Attach to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          files: image-digest.txt
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
