@@ -82,6 +82,45 @@ fn make_evaluator(mode: WiaMode, rules: Vec<AttestationRule>) -> WalletAttestati
     WalletAttestationEvaluator::new(pdp, policy, mode, Url::parse(ISSUER_BASE).unwrap())
 }
 
+/// The issue-#17 derivation cases' evaluator: the test PDP trusts the
+/// identity the shaped leaf SHOULD derive (the cases assert the
+/// derivation, not the trust list).
+fn make_evaluator_trusting(trusted: &str) -> WalletAttestationEvaluator {
+    let pdp: Arc<dyn TrustPdp> = Arc::new(WalletProviderPdp {
+        trusted: trusted.to_owned(),
+    });
+    let policy: Arc<dyn AttestationPolicy> = Arc::new(WildcardRulesPolicy::new(Vec::new()));
+    WalletAttestationEvaluator::new(
+        pdp,
+        policy,
+        WiaMode::Either,
+        Url::parse(ISSUER_BASE).unwrap(),
+    )
+}
+
+/// An attestation issuer whose leaf cert is SHAPED by the closure —
+/// issue #17's derivation cases (SAN URI, DirectoryString CNs).
+fn shaped_attestation_issuer(
+    shape: impl FnOnce(&mut rcgen::CertificateParams),
+) -> AttestationIssuer {
+    use p256::ecdsa::signature::rand_core::OsRng;
+    let key = p256::ecdsa::SigningKey::random(&mut OsRng);
+    use p256::pkcs8::EncodePrivateKey;
+    let pkcs8 = key.to_pkcs8_der().unwrap();
+    let kp = rcgen::KeyPair::from_pkcs8_der_and_sign_algo(
+        &rustls_pki_types::PrivatePkcs8KeyDer::from(pkcs8.as_bytes()),
+        &rcgen::PKCS_ECDSA_P256_SHA256,
+    )
+    .unwrap();
+    let mut params = rcgen::CertificateParams::default();
+    shape(&mut params);
+    let cert = params.self_signed(&kp).unwrap();
+    AttestationIssuer {
+        key,
+        cert_der: cert.der().to_vec(),
+    }
+}
+
 /// A test attestation-issuer keypair + self-signed cert over it.
 struct AttestationIssuer {
     key: p256::ecdsa::SigningKey,
@@ -480,4 +519,115 @@ fn wia_mode_parses() {
     assert_eq!(WiaMode::parse("ietf").unwrap(), WiaMode::Ietf);
     assert_eq!(WiaMode::parse("").unwrap(), WiaMode::Either);
     assert!(WiaMode::parse("quantum").is_err());
+}
+
+// ─── Issue #17: the x5c leaf identity derivation (SAN DNS > SAN URI > CN) ──
+
+/// The SAN URI case — documented, never implemented: a leaf identifying
+/// by a SAN URI (this ecosystem's own issuer-leaf convention) derives
+/// the URI, and the WIA evaluates.
+#[tokio::test]
+async fn x5c_leaf_identity_derives_the_san_uri() {
+    let issuer = shaped_attestation_issuer(|params| {
+        params.subject_alt_names = vec![rcgen::SanType::URI(
+            "https://wallet-provider.example.org/attestations"
+                .try_into()
+                .unwrap(),
+        )];
+    });
+    let (wia, _) = etsi_wia(&issuer);
+    let evaluator = make_evaluator_trusting("https://wallet-provider.example.org/attestations");
+    let result = evaluator.evaluate(&wia, "pid").await.unwrap();
+    assert_eq!(
+        result.issuer, "https://wallet-provider.example.org/attestations",
+        "the SAN URI is the identity"
+    );
+}
+
+/// The order is over the WHOLE SAN: a URI listed before a DNS name does
+/// not win — DNS beats URI whichever order the names appear in.
+#[tokio::test]
+async fn x5c_leaf_identity_dns_beats_uri_across_the_whole_san() {
+    let issuer = shaped_attestation_issuer(|params| {
+        params.subject_alt_names = vec![
+            rcgen::SanType::URI("https://uri-listed-first.example.org".try_into().unwrap()),
+            rcgen::SanType::DnsName("dns-wins.example.org".try_into().unwrap()),
+        ];
+    });
+    let (wia, _) = etsi_wia(&issuer);
+    let evaluator = make_evaluator_trusting("dns-wins.example.org");
+    let result = evaluator.evaluate(&wia, "pid").await.unwrap();
+    assert_eq!(result.issuer, "dns-wins.example.org", "DNS > URI");
+}
+
+/// The CN fallback's PrintableString case — issue #17's live proof: the
+/// gdc wallet-provider leaf (`CN = E2E Test Wallet Provider`, DER
+/// PrintableString — what openssl mints for ASCII by default) reported
+/// "no SAN or CN" because the reader only decoded Utf8String (and fed
+/// the Any's CONTENT to a full-TLV parser, so even UTF-8 CNs could not
+/// parse).
+#[tokio::test]
+async fn x5c_leaf_identity_derives_the_printablestring_cn() {
+    let issuer = shaped_attestation_issuer(|params| {
+        params.distinguished_name.push(
+            rcgen::DnType::CommonName,
+            rcgen::DnValue::PrintableString("E2E Test Wallet Provider".try_into().unwrap()),
+        );
+    });
+    let (wia, _) = etsi_wia(&issuer);
+    let evaluator = make_evaluator_trusting("E2E Test Wallet Provider");
+    let result = evaluator.evaluate(&wia, "pid").await.unwrap();
+    assert_eq!(
+        result.issuer, "E2E Test Wallet Provider",
+        "the openssl-minted PrintableString CN is the identity"
+    );
+}
+
+/// The CN fallback's UTF-8 case — the path the old code attempted and
+/// (content-bytes bug) never achieved.
+#[tokio::test]
+async fn x5c_leaf_identity_derives_the_utf8_cn() {
+    let issuer = shaped_attestation_issuer(|params| {
+        params.distinguished_name.push(
+            rcgen::DnType::CommonName,
+            rcgen::DnValue::Utf8String("Wallet Provider Ünïcode".to_owned()),
+        );
+    });
+    let (wia, _) = etsi_wia(&issuer);
+    let evaluator = make_evaluator_trusting("Wallet Provider Ünïcode");
+    let result = evaluator.evaluate(&wia, "pid").await.unwrap();
+    assert_eq!(result.issuer, "Wallet Provider Ünïcode", "the UTF-8 CN");
+}
+
+/// BMPString CN — the wide-alphabet encoding real CAs emit; carried for
+/// completeness (RFC 5280 §4.1.2.4 leaves the CN encoding open).
+#[tokio::test]
+async fn x5c_leaf_identity_derives_the_bmp_cn() {
+    let issuer = shaped_attestation_issuer(|params| {
+        params.distinguished_name.push(
+            rcgen::DnType::CommonName,
+            rcgen::DnValue::BmpString("Wället Provider".try_into().unwrap()),
+        );
+    });
+    let (wia, _) = etsi_wia(&issuer);
+    let evaluator = make_evaluator_trusting("Wället Provider");
+    let result = evaluator.evaluate(&wia, "pid").await.unwrap();
+    assert_eq!(result.issuer, "Wället Provider", "the BMPString CN");
+}
+
+/// Neither SAN nor CN: the terminal refusal, unchanged.
+#[tokio::test]
+async fn x5c_leaf_without_identity_still_refuses() {
+    // rcgen's default params mint a placeholder CN ("rcgen self signed
+    // cert") — empty the DN so the leaf is truly identity-less.
+    let issuer = shaped_attestation_issuer(|params| {
+        params.distinguished_name = rcgen::DistinguishedName::new();
+    });
+    let (wia, _) = etsi_wia(&issuer);
+    let evaluator = make_evaluator_trusting("anything");
+    let err = evaluator.evaluate(&wia, "pid").await.unwrap_err();
+    assert!(
+        err.message.contains("no SAN or CN"),
+        "the leaf without a derivable identity refuses: {err}"
+    );
 }

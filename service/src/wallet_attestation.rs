@@ -514,6 +514,13 @@ fn parse_attestation_identity(attestation: &str) -> Result<AttestationIdentity> 
 
 /// The x5c leaf's wallet-provider identity (vc `issuerFromX5CLeaf`):
 /// SAN DNS name > SAN URI > Subject CN.
+///
+/// The SAN order is over the WHOLE extension — a URI listed before a
+/// DNS name does not win; DNS beats URI whichever order the names
+/// appear in (issue #17: the URI case was documented but never
+/// implemented, and a wallet-provider leaf identifying by SAN URI —
+/// this ecosystem's own issuer-leaf convention — fell through as if
+/// no SAN existed).
 fn issuer_from_x5c_leaf(der: &[u8]) -> Result<String> {
     use x509_cert::der::Decode;
     let cert = x509_cert::Certificate::from_der(der)
@@ -524,6 +531,7 @@ fn issuer_from_x5c_leaf(der: &[u8]) -> Result<String> {
     use x509_cert::ext::pkix::name::GeneralName;
     use x509_cert::ext::pkix::SubjectAltName;
     let san_oid = ObjectIdentifier::new_unwrap("2.5.29.17");
+    let mut san_uri: Option<String> = None;
     for extension in cert.tbs_certificate.extensions.iter().flatten() {
         if extension.extn_id != san_oid {
             continue;
@@ -531,10 +539,20 @@ fn issuer_from_x5c_leaf(der: &[u8]) -> Result<String> {
         let san = SubjectAltName::from_der(extension.extn_value.as_bytes())
             .map_err(|_| Error::new(code::INVALID_INPUT, "x5c leaf SAN"))?;
         for name in &san.0 {
-            if let GeneralName::DnsName(dns) = name {
-                return Ok(dns.to_string());
+            match name {
+                // First DNS name wins outright.
+                GeneralName::DnsName(dns) => return Ok(dns.to_string()),
+                // The first URI, remembered — the fallback when the
+                // whole SAN carries no DNS name.
+                GeneralName::UniformResourceIdentifier(uri) if san_uri.is_none() => {
+                    san_uri = Some(uri.to_string());
+                }
+                _ => {}
             }
         }
+    }
+    if let Some(uri) = san_uri {
+        return Ok(uri);
     }
     // Subject CN (2.5.4.3): RdnSequence → each RDN's ATV set.
     let cn_oid = ObjectIdentifier::new_unwrap("2.5.4.3");
@@ -543,10 +561,8 @@ fn issuer_from_x5c_leaf(der: &[u8]) -> Result<String> {
             if atv.oid != cn_oid {
                 continue;
             }
-            // The value is an Any (unconstrained): decode as UTF-8
-            // when it is one (der 0.7's Utf8StringRef is a Decodable).
-            if let Ok(value) = x509_cert::der::asn1::Utf8StringRef::from_der(atv.value.value()) {
-                return Ok(value.to_string());
+            if let Some(cn) = directory_string(&atv.value) {
+                return Ok(cn);
             }
         }
     }
@@ -554,6 +570,31 @@ fn issuer_from_x5c_leaf(der: &[u8]) -> Result<String> {
         code::INVALID_INPUT,
         "x5c leaf has no SAN or CN to derive issuer identity",
     ))
+}
+
+/// A CN's DirectoryString value (RFC 5280 §4.1.2.4 leaves the encoding
+/// open — the Any carries any of them): decode whichever the CA minted.
+///
+/// Issue #17's live proof: openssl writes ASCII CN values as
+/// **PrintableString** (DER tag 19) by default, so a Utf8String-only
+/// reader never sees them — the gdc wallet-provider leaf (`CN = E2E
+/// Test Wallet Provider`, PrintableString) reported "no SAN or CN".
+/// (Worse: the old code fed `Any::value()` — the CONTENT bytes — to a
+/// full-TLV parser, so even a UTF-8 CN could not parse; `decode_as` is
+/// the API that handles the tag.) BMPString (30) carried for
+/// completeness — the wide-alphabet encodings real CAs emit.
+fn directory_string(any: &x509_cert::der::asn1::Any) -> Option<String> {
+    use x509_cert::der::asn1::{BmpString, PrintableStringRef, Utf8StringRef};
+    if let Ok(value) = any.decode_as::<Utf8StringRef>() {
+        return Some(value.to_string());
+    }
+    if let Ok(value) = any.decode_as::<PrintableStringRef>() {
+        return Some(value.to_string());
+    }
+    if let Ok(value) = any.decode_as::<BmpString>() {
+        return Some(value.to_string());
+    }
+    None
 }
 
 /// iss↔cert consistency (vc `issMatchesCertIdentity`): exact, or the
