@@ -1,11 +1,32 @@
 name: Publish issuance flow
 
+# The package's publish is automatic (issue #12 follow-up): every push to
+# main that touches issuance-flow/** runs the module's tests and, when
+# the version in package.json is NOT already on the registry, publishes
+# it. The idempotence guard makes the flow re-run-safe — a doc-only or
+# test-only change to an already-published version skips the publish (a
+# green skip, never a red "already exists" failure), and a merge that
+# lands several module changes publishes once. The manual dispatch stays
+# (the recovery path: re-publish after a token rotation, or a deliberate
+# re-run).
+#
+# NPM_TOKEN is the only secret (npm auth); the `npm` environment scopes
+# it. The registry check needs no auth — the registry's tarball metadata
+# is public.
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "issuance-flow/**"
 
 permissions:
   contents: read
   id-token: write
+
+concurrency:
+  group: publish-issuance-flow
+  cancel-in-progress: false
 
 jobs:
   publish:
@@ -20,8 +41,22 @@ jobs:
           package-manager-cache: false
       - run: npm test
         working-directory: issuance-flow
+      - name: Skip when this version is already published (idempotent)
+        id: published
+        run: |
+          version=$(node -p "require('./issuance-flow/package.json').version")
+          code=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://registry.npmjs.org/@sirosfoundation/issuance-flow/${version}")
+          if [ "$code" = "200" ]; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "@sirosfoundation/issuance-flow@${version} is already on the registry — skipping publish"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            echo "@sirosfoundation/issuance-flow@${version} is not on the registry — publishing"
+          fi
       # npm exchanges this workflow's OIDC identity; no long-lived token.
       - run: npm publish --access public
+        if: steps.published.outputs.published == 'false'
         working-directory: issuance-flow
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
