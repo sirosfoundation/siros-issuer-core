@@ -541,10 +541,12 @@ impl SessionStore for MongoStore {
     async fn set_refresh_token(
         &self,
         id: &SessionId,
-        hash: String,
+        token: String,
         expires_unix: i64,
         dpop_jkt: Option<String>,
     ) -> Result<()> {
+        use sha2::{Digest, Sha256};
+        let hash = hex(&Sha256::digest(token.as_bytes()));
         self.sessions
             .update_one(
                 doc! { "_id": id.as_str() },
@@ -580,11 +582,12 @@ impl SessionStore for MongoStore {
     async fn rotate_refresh_token(
         &self,
         old_token: &str,
-        new_hash: String,
+        new_token: String,
         new_expires_unix: i64,
     ) -> Result<()> {
         use sha2::{Digest, Sha256};
         let old_hash = hex(&Sha256::digest(old_token.as_bytes()));
+        let new_hash = hex(&Sha256::digest(new_token.as_bytes()));
         self.sessions
             .find_one_and_update(
                 doc! { "refresh_token_hash": &old_hash },

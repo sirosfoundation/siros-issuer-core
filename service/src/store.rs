@@ -314,16 +314,17 @@ impl MemoryStore {
         Ok(())
     }
 
-    /// Arm a refresh token on a session (token endpoint, initial mint):
-    /// the hash, the expiry, and the DPoP jkt it is sender-constrained
-    /// to (gap 1, RFC 6749 §6).
+    /// Arm a refresh token on a session (token endpoint, initial
+    /// mint): the RAW token (hashed at rest), the expiry, and the DPoP
+    /// jkt it is sender-constrained to (gap 1, RFC 6749 §6).
     pub fn set_refresh_token(
         &self,
         id: &SessionId,
-        hash: String,
+        token: String,
         expires_unix: i64,
         dpop_jkt: Option<String>,
     ) -> Result<()> {
+        let hash = sha_hex(&token);
         let mut inner = self.lock()?;
         let record = inner
             .records
@@ -345,17 +346,19 @@ impl MemoryStore {
         inner.records.get(id).cloned()
     }
 
-    /// RFC 6749 §6 single-use rotation: CAS on the old hash. Under the
-    /// lock, a replayed rotation misses the index (the first one moved
-    /// it) and refuses without touching anything.
+    /// RFC 6749 §6 single-use rotation: RAW old and new tokens, both
+    /// hashed at rest. CAS on the old hash — under the lock, a
+    /// replayed rotation misses the index (the first one moved it) and
+    /// refuses without touching anything.
     pub fn rotate_refresh_token(
         &self,
         old_token: &str,
-        new_hash: String,
+        new_token: String,
         new_expires_unix: i64,
     ) -> Result<()> {
         let mut inner = self.lock()?;
         let old_hash = sha_hex(old_token);
+        let new_hash = sha_hex(&new_token);
         let id = inner
             .by_refresh_token
             .get(&old_hash)
@@ -774,12 +777,13 @@ pub trait SessionStore: Send + Sync {
     async fn rotate_c_nonce(&self, id: &SessionId, nonce: String, expires_unix: i64) -> Result<()>;
 
     /// Arm a refresh token on a session (token endpoint initial mint,
-    /// RFC 6749 §6 / gap 1): the hash, expiry, and the DPoP jkt it is
-    /// sender-constrained to.
+    /// RFC 6749 §6 / gap 1): the RAW token (hashed at rest by the
+    /// store — the same convention as the pre-authorized code), its
+    /// expiry, and the DPoP jkt it is sender-constrained to.
     async fn set_refresh_token(
         &self,
         id: &SessionId,
-        hash: String,
+        token: String,
         expires_unix: i64,
         dpop_jkt: Option<String>,
     ) -> Result<()>;
@@ -788,13 +792,13 @@ pub trait SessionStore: Send + Sync {
     /// pre-claim checks never consume).
     async fn peek_by_refresh_token(&self, token: &str) -> Option<SessionRecord>;
 
-    /// RFC 6749 §6 single-use rotation: CAS on the old hash — a
-    /// replayed or concurrent rotation misses and refuses
-    /// (`invalid_grant`).
+    /// RFC 6749 §6 single-use rotation: RAW old and new tokens — the
+    /// store hashes both. CAS on the old hash: a replayed or
+    /// concurrent rotation misses and refuses (`invalid_grant`).
     async fn rotate_refresh_token(
         &self,
         old_token: &str,
-        new_hash: String,
+        new_token: String,
         new_expires_unix: i64,
     ) -> Result<()>;
 
@@ -987,11 +991,11 @@ impl SessionStore for MemoryStore {
     async fn set_refresh_token(
         &self,
         id: &SessionId,
-        hash: String,
+        token: String,
         expires_unix: i64,
         dpop_jkt: Option<String>,
     ) -> Result<()> {
-        MemoryStore::set_refresh_token(self, id, hash, expires_unix, dpop_jkt)
+        MemoryStore::set_refresh_token(self, id, token, expires_unix, dpop_jkt)
     }
 
     async fn peek_by_refresh_token(&self, token: &str) -> Option<SessionRecord> {
@@ -1001,10 +1005,10 @@ impl SessionStore for MemoryStore {
     async fn rotate_refresh_token(
         &self,
         old_token: &str,
-        new_hash: String,
+        new_token: String,
         new_expires_unix: i64,
     ) -> Result<()> {
-        MemoryStore::rotate_refresh_token(self, old_token, new_hash, new_expires_unix)
+        MemoryStore::rotate_refresh_token(self, old_token, new_token, new_expires_unix)
     }
 
     async fn find_by_offer_uuid(&self, offer_uuid: &str) -> Option<SessionRecord> {

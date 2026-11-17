@@ -508,7 +508,6 @@ async fn refresh_rotation_is_single_use_across_concurrent_rotations() {
         eprintln!("skipping: no mongod at {DEFAULT_URI} — the host mongod");
         return;
     };
-    use sha2::{Digest, Sha256};
     let id = session_id(7);
     store
         .insert(record(&id, St::Redeeming, NOW + 300))
@@ -516,11 +515,12 @@ async fn refresh_rotation_is_single_use_across_concurrent_rotations() {
         .unwrap();
     let old_rt = format!("rt-{}", id.as_str());
 
-    // Arm: the initial mint (hash + expiry + the constraint jkt).
+    // Arm: the initial mint (the RAW token — the store hashes at
+    // rest — plus expiry and the constraint jkt).
     store
         .set_refresh_token(
             &id,
-            hex(&Sha256::digest(old_rt.as_bytes())),
+            old_rt.clone(),
             NOW + 900,
             Some("jkt-issuance-time".to_owned()),
         )

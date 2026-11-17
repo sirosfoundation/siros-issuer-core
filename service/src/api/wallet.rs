@@ -642,9 +642,11 @@ pub async fn token(
                 let old =
                     get("refresh_token").expect("the refresh grant arm validated the parameter");
                 let rotated = random_handle("rt_", 32);
+                // Raw token in — the store hashes at rest (the same
+                // convention as the pre-authorized code).
                 state
                     .sessions
-                    .rotate_refresh_token(&old, hex_of(&rotated), expires)
+                    .rotate_refresh_token(&old, rotated.clone(), expires)
                     .await
                     .map_err(oauth_err)?;
                 (Some(rotated), Some(cfg.duration))
@@ -652,7 +654,7 @@ pub async fn token(
                 let minted = random_handle("rt_", 32);
                 state
                     .sessions
-                    .set_refresh_token(&record.id, hex_of(&minted), expires, dpop.clone())
+                    .set_refresh_token(&record.id, minted.clone(), expires, dpop.clone())
                     .await
                     .map_err(oauth_err)?;
                 (Some(minted), Some(cfg.duration))
