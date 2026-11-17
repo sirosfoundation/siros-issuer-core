@@ -68,6 +68,9 @@ fn record(id: &SessionId, state: St, expires_at: i64) -> SessionRecord {
         revoked: false,
         created_at_unix: expires_at - 300,
         expires_at_unix: expires_at,
+        refresh_token_hash: None,
+        refresh_token_expires_unix: None,
+        refresh_dpop_jkt: None,
         history: Vec::new(),
     }
 }
@@ -493,4 +496,88 @@ async fn rate_counter_shares_the_budget_across_instances() {
     // One bucket's spend never leaks into another client's id.
     assert!(b.allow("/token", "10.0.0.3", now).await.unwrap());
     client.database(&db).drop().await.ok();
+}
+
+/// RFC 6749 §6 single-use rotation across the wire (gap 1): two
+/// concurrent rotations of one refresh token — exactly one wins (the
+/// CAS filter on the old hash), the loser answers Err, the peek finds
+/// only the successor, and the successor chains.
+#[tokio::test]
+async fn refresh_rotation_is_single_use_across_concurrent_rotations() {
+    let Some((store, _coll)) = store("refresh_single_use").await else {
+        eprintln!("skipping: no mongod at {DEFAULT_URI} — the host mongod");
+        return;
+    };
+    use sha2::{Digest, Sha256};
+    let id = session_id(7);
+    store
+        .insert(record(&id, St::Redeeming, NOW + 300))
+        .await
+        .unwrap();
+    let old_rt = format!("rt-{}", id.as_str());
+
+    // Arm: the initial mint (hash + expiry + the constraint jkt).
+    store
+        .set_refresh_token(
+            &id,
+            hex(&Sha256::digest(old_rt.as_bytes())),
+            NOW + 900,
+            Some("jkt-issuance-time".to_owned()),
+        )
+        .await
+        .unwrap();
+
+    // The peek sees the armed token without consuming it.
+    let peeked = store
+        .peek_by_refresh_token(&old_rt)
+        .await
+        .expect("armed token peeks");
+    assert_eq!(
+        peeked.refresh_dpop_jkt.as_deref(),
+        Some("jkt-issuance-time")
+    );
+    assert_eq!(peeked.refresh_token_expires_unix, Some(NOW + 900));
+
+    // Two concurrent rotations: exactly one wins.
+    let (a, b) = tokio::join!(
+        store.rotate_refresh_token(&old_rt, format!("rt-a-{}", id.as_str()), NOW + 900),
+        store.rotate_refresh_token(&old_rt, format!("rt-b-{}", id.as_str()), NOW + 900),
+    );
+    let winners = [a.is_ok(), b.is_ok()].iter().filter(|w| **w).count();
+    assert_eq!(winners, 1, "exactly one concurrent rotation wins");
+
+    // The old token is gone; the successor peeks (with the constraint
+    // intact — rotation never touches the jkt) and chains.
+    assert!(store.peek_by_refresh_token(&old_rt).await.is_none());
+    let successor = if a.is_ok() {
+        format!("rt-a-{}", id.as_str())
+    } else {
+        format!("rt-b-{}", id.as_str())
+    };
+    let peeked = store
+        .peek_by_refresh_token(&successor)
+        .await
+        .expect("the successor peeks");
+    assert_eq!(
+        peeked.refresh_dpop_jkt.as_deref(),
+        Some("jkt-issuance-time")
+    );
+
+    // The successor chains (and the old token stays dead).
+    store
+        .rotate_refresh_token(&successor, format!("rt-c-{}", id.as_str()), NOW + 900)
+        .await
+        .unwrap();
+    assert!(store.peek_by_refresh_token(&old_rt).await.is_none());
+    assert!(store
+        .rotate_refresh_token(&old_rt, format!("rt-d-{}", id.as_str()), NOW + 900)
+        .await
+        .is_err());
+    assert!(
+        store
+            .peek_by_refresh_token(&format!("rt-c-{}", id.as_str()))
+            .await
+            .is_some(),
+        "the chained successor lives"
+    );
 }
