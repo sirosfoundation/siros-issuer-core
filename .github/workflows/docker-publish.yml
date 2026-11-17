@@ -58,16 +58,13 @@ jobs:
       - name: Write and upload image-digest.txt
         run: |
           printf 'ghcr.io/sirosfoundation/siros-issuer-core@%s\n' '${{ needs.docker.outputs.digest }}' > image-digest.txt
-      - uses: actions/upload-artifact@v4
-        with:
-          name: image-digest
-          path: image-digest.txt
-      # github.token (contents: write on this job) attaches the digest
-      # to the tag's release — the verifier release.yml's shape.
+      # The runner's own gh attaches the digest to the tag's release
+      # (contents: write on this job) — no third-party action to pin
+      # (Sonar S7637), the verifier release.yml's digest-attachment shape.
       - name: Attach to the release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-          files: image-digest.txt
+        run: |
+          tag="${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
+          gh release upload "${tag}" image-digest.txt --clobber
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
