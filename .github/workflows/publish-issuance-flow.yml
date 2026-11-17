@@ -10,9 +10,12 @@ name: Publish issuance flow
 # (the recovery path: re-publish after a token rotation, or a deliberate
 # re-run).
 #
-# NPM_TOKEN is the only secret (npm auth); the `npm` environment scopes
-# it. The registry check needs no auth — the registry's tarball metadata
-# is public.
+# npm Trusted Publishing (OIDC): no npm token secret anywhere — npm
+# exchanges this workflow's GitHub OIDC identity for the publish. The
+# npmjs-side trust config (org settings → Trusted Publisher) must match
+# THIS file: repository sirosfoundation/siros-issuer-core, workflow
+# publish-issuance-flow.yml, environment npm. The registry check needs
+# no auth either — the registry's tarball metadata is public.
 on:
   workflow_dispatch:
   push:
@@ -54,9 +57,12 @@ jobs:
             echo "published=false" >> "$GITHUB_OUTPUT"
             echo "@sirosfoundation/issuance-flow@${version} is not on the registry — publishing"
           fi
-      # npm exchanges this workflow's OIDC identity; no long-lived token.
+      # npm Trusted Publishing (OIDC): no token, no secret — npm exchanges
+      # this workflow's GitHub OIDC identity for the publish. The npmjs-side
+      # trust config must match THIS file exactly: repository
+      # sirosfoundation/siros-issuer-core, workflow publish-issuance-flow.yml,
+      # environment npm. NODE_AUTH_TOKEN deliberately unset (an empty token
+      # shadows the OIDC path with a 401).
       - run: npm publish --access public
         if: steps.published.outputs.published == 'false'
         working-directory: issuance-flow
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
