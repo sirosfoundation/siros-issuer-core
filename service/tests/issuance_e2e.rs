@@ -4832,3 +4832,65 @@ async fn refresh_grant_expiry_refuses() {
         "{body}"
     );
 }
+
+/// Issue #10: an array-form `aud` client assertion (RFC 7519 §4.1.3 —
+/// the other legal encoding) verifies at the token endpoint the same
+/// as the string form `client_assertion_jwt()` uses: every builder
+/// emits one of the two, and both are the claim.
+#[tokio::test]
+async fn array_form_aud_assertion_verifies() {
+    let allocator = Arc::new(RecordingAllocator {
+        list_url: Url::parse("http://127.0.0.1:9/lists/test-list").unwrap(),
+        next_index: AtomicU64::new(7),
+        updates: Mutex::new(Vec::new()),
+    });
+    let service = spawn_service(Arc::new(PermitPdp), allocator, test_signer()).await;
+    let code = mint_pre_auth_code(&service).await;
+
+    let key: jose_rs::jwk::Jwk = serde_json::from_str(CLIENT_PRIVATE_JWK).expect("test client key");
+    let now = now_unix();
+    let assertion = sign_jwt(
+        &key,
+        "jwt",
+        &json!({
+            "iss": "suite-wallet",
+            "sub": "suite-wallet",
+            "aud": [ISSUER_BASE],
+            "iat": now,
+            "exp": now + 300,
+            "jti": siros_issuer_core::sdjwt_issue::b64u(&{
+                let mut b = [0u8; 16];
+                getrandom::fill(&mut b).expect("OS randomness");
+                b
+            }),
+        }),
+        false,
+    );
+
+    let client = reqwest::Client::new();
+    let token: Value = client
+        .post(format!("{}/token", service.base))
+        .form(&[
+            (
+                "grant_type".to_owned(),
+                GRANT_PRE_AUTHORIZED_CODE.to_owned(),
+            ),
+            ("pre_authorized_code".to_owned(), code),
+            ("client_id".to_owned(), "suite-wallet".to_owned()),
+            (
+                "client_assertion_type".to_owned(),
+                "urn:ietf:params:oauth:client-assertion-type:jwt-bearer".to_owned(),
+            ),
+            ("client_assertion".to_owned(), assertion),
+        ])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        token["access_token"].is_string(),
+        "the array-aud assertion verifies: {token}"
+    );
+}

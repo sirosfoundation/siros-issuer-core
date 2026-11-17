@@ -13,6 +13,27 @@ use serde_json::Value;
 use siros_issuer_core::error::code;
 use siros_issuer_core::{Error, Result};
 
+/// RFC 7519 §4.1.3 `aud` as its claim-value list: a single StringOrURI
+/// equals the one-element array (the form every common JWT builder —
+/// Nimbus, jose, Go — emits for one audience). Issue #10: consuming
+/// either encoding alone fails the other; this normalizes both.
+///
+/// **SUNET/vc alignment**: every vc `aud` consumption accepts both
+/// encodings through golang-jwt v5's `ClaimStrings` — the WIA PoP
+/// (`pkg/trust/wallet_attestation.go`: `slices.Contains(claims.Audience,
+/// …)`), the client assertion (`pkg/oauth2/client_assertion_verifier.go`:
+/// `jwt.WithAudience` **plus** an explicit `switch claims["aud"].(type)`
+/// over `string`/`[]any`), and the integrator middleware
+/// (`pkg/httphelpers/middleware_jwt.go`: `jwt.WithAudience`). This
+/// normalizer is that behavior.
+pub(crate) fn aud_strings(claims: &Value) -> Vec<&str> {
+    match claims.get("aud") {
+        Some(Value::String(s)) => vec![s.as_str()],
+        Some(Value::Array(items)) => items.iter().filter_map(Value::as_str).collect(),
+        _ => Vec::new(),
+    }
+}
+
 pub struct IntegratorIdentity {
     /// The integrator's ENTITY identity — the assertion's `iss` — what
     /// an entity-keyed trust registry (go-trust's whitelist: URL lists
@@ -71,14 +92,15 @@ pub fn verify_bearer_assertion(
     let claims: Value = serde_json::from_slice(&payload)
         .map_err(|e| Error::new(code::INVALID_INPUT, format!("assertion claims: {e}")))?;
 
-    let aud = claims
-        .get("aud")
-        .and_then(Value::as_str)
-        .ok_or_else(|| Error::new(code::INVALID_INPUT, "assertion has no aud"))?;
     // §12.2.3 byte-identity: the identifier carries no empty-path slash
     // (`Url`'s Display would add one), and assertions are signed with the
-    // configured form.
-    if aud != siros_issuer_core::oid4vci::issuer_identifier(expected_aud) {
+    // configured form. `aud` in either RFC 7519 encoding (issue #10).
+    let expected = siros_issuer_core::oid4vci::issuer_identifier(expected_aud);
+    let auds = aud_strings(&claims);
+    if auds.is_empty() {
+        return Err(Error::new(code::INVALID_INPUT, "assertion has no aud"));
+    }
+    if !auds.contains(&expected.as_str()) {
         return Err(Error::new(code::INVALID_INPUT, "assertion aud mismatch"));
     }
     let iss = claims
@@ -179,11 +201,13 @@ pub fn verify_jwt_proof(
         .map_err(|e| Error::new(code::INVALID_PROOF, format!("proof signature: {e}")))?;
     let claims: Value = serde_json::from_slice(&payload)
         .map_err(|e| Error::new(code::INVALID_INPUT, format!("proof claims: {e}")))?;
-    let aud = claims
-        .get("aud")
-        .and_then(Value::as_str)
-        .ok_or_else(|| Error::new(code::INVALID_INPUT, "proof has no aud"))?;
-    if aud != siros_issuer_core::oid4vci::issuer_identifier(expected_aud) {
+    // `aud` in either RFC 7519 encoding (issue #10).
+    let expected = siros_issuer_core::oid4vci::issuer_identifier(expected_aud);
+    let auds = aud_strings(&claims);
+    if auds.is_empty() {
+        return Err(Error::new(code::INVALID_INPUT, "proof has no aud"));
+    }
+    if !auds.contains(&expected.as_str()) {
         return Err(Error::new(code::INVALID_INPUT, "proof aud mismatch"));
     }
     let nonce = claims

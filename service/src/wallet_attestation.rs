@@ -611,13 +611,16 @@ fn validate_attestation_pop(attestation: &str, pop: &str, expected_audience: &st
     )
     .map_err(|e| Error::new(code::INVALID_INPUT, format!("pop claims: {e}")))?;
 
-    // aud contains this AS (vc contains the issuer URL).
-    let auds = pop_claims["aud"].as_array().cloned().unwrap_or_default();
-    let aud_strings: Vec<&str> = auds.iter().filter_map(Value::as_str).collect();
-    if !aud_strings.contains(&expected_audience) {
+    // aud contains this AS (vc contains the issuer URL), in either
+    // RFC 7519 §4.1.3 encoding (issue #10): the single-string form every
+    // common JWT builder emits for one audience — Nimbus's
+    // `.audience(String)`, jose's `setAudience(string)` — equals the
+    // one-element array.
+    let auds = crate::auth::aud_strings(&pop_claims);
+    if !auds.contains(&expected_audience) {
         return Err(Error::new(
             code::INVALID_INPUT,
-            format!("pop aud {aud_strings:?} does not contain {expected_audience:?}"),
+            format!("pop aud {auds:?} does not contain {expected_audience:?}"),
         ));
     }
 

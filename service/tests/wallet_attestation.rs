@@ -404,6 +404,37 @@ async fn pop_validates_against_cnf_and_audience() {
         .await
         .unwrap();
 
+    // Issue #10: a single-string `aud` PoP — RFC 7519 §4.1.3
+    // StringOrURI, the form every common JWT builder emits for one
+    // audience (Nimbus `.audience(String)`, jose
+    // `setAudience(string)`; the SIROS sample wallets' PoP always
+    // uses it) — verifies as the one-element array it equals.
+    let claims_string_aud = json!({
+        "aud": issuer_identifier(&Url::parse(ISSUER_BASE).unwrap()),
+        "iat": NOW,
+        "exp": NOW + 300,
+        "jti": "pop-string-aud",
+    });
+    let pop_string_aud = sign_compact(&wallet_key, &header, &claims_string_aud);
+    evaluator
+        .evaluate_with_pop(&wia, &pop_string_aud, "pid")
+        .await
+        .unwrap();
+
+    // A WRONG audience in string form: still refused (the encoding
+    // never widens the check).
+    let claims_wrong_string = json!({
+        "aud": "https://someone-else.example.org",
+        "iat": NOW,
+        "exp": NOW + 300,
+    });
+    let pop_wrong_string = sign_compact(&wallet_key, &header, &claims_wrong_string);
+    let err = evaluator
+        .evaluate_with_pop(&wia, &pop_wrong_string, "pid")
+        .await
+        .unwrap_err();
+    assert!(err.message.contains("aud"), "{err}");
+
     // Wrong typ: refused.
     let header_wrong_typ = json!({ "alg": "ES256", "typ": "JWT" });
     let pop_wrong = sign_compact(&wallet_key, &header_wrong_typ, &claims);
