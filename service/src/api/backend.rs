@@ -473,6 +473,20 @@ pub async fn get_session(
         "wallet_redirect".to_owned(),
         json!(siros_issuer_core::oid4vci::CredentialOffer::deep_link(&offer_uri).as_str()),
     );
+    // The §10 handle vocabulary's `status` member (design §10.2.3 — SSE
+    // ships in v1, and the record advertises its own stream): this
+    // session's events endpoint. The integrator's backend proxies it
+    // with its own auth (a browser's EventSource cannot carry the Bearer
+    // assertion); the JS module reads it from the proxied handle and
+    // falls back to polling when the proxy strips it.
+    let events = state
+        .issuer_base
+        .join(&format!(
+            "api/v1/issuance/sessions/{}/events",
+            record.id.as_str()
+        ))
+        .map_err(|e| api_error(Error::configuration(e.to_string())))?;
+    object.insert("status".to_owned(), json!(events.as_str()));
     object.insert("revoked".to_owned(), json!(record.revoked));
     object.insert("notification_id".to_owned(), json!(record.notification_id));
     Ok(Json(body))

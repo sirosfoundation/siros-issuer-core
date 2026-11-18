@@ -1550,6 +1550,55 @@ async fn sse_streams_session_state() {
     assert!(text.contains("\"state\":\"offered\""), "got: {text}");
 }
 
+/// The session record advertises its own SSE stream (design §10.2.3 —
+/// the `status` member of the §10 handle vocabulary): the integrator's
+/// frontend can only consume the stream through a proxy it authenticates,
+/// and the record — not out-of-band knowledge of the route — is where it
+/// learns the URL.
+#[tokio::test]
+async fn session_get_advertises_the_sse_stream() {
+    let allocator = Arc::new(RecordingAllocator {
+        list_url: Url::parse("http://127.0.0.1:9/lists/x").unwrap(),
+        next_index: AtomicU64::new(0),
+        updates: Mutex::new(Vec::new()),
+    });
+    let service = spawn_service(Arc::new(PermitPdp), allocator, test_signer()).await;
+    let integrator = ec_key();
+
+    let (created, _) = create_session(
+        &service,
+        &integrator,
+        json!({"credential": "urn:eudi:pid:1", "subject": {"given_name": "A", "family_name": "B"}}),
+    )
+    .await;
+    let body: Value = created.json().await.unwrap();
+    let session_id = body["session_id"].as_str().unwrap().to_owned();
+
+    let record: Value = reqwest::Client::new()
+        .get(format!(
+            "{}/api/v1/issuance/sessions/{session_id}",
+            service.base
+        ))
+        .header(
+            "Authorization",
+            format!(
+                "Bearer {}",
+                client_assertion(&integrator, &Url::parse(ISSUER_BASE).unwrap())
+            ),
+        )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        record["status"],
+        format!("{ISSUER_BASE}/api/v1/issuance/sessions/{session_id}/events"),
+        "the record names its own stream (§10.2.3)"
+    );
+}
+
 // ─── P2: the wallet-initiated authorization-code grant (design §7.2) ──────
 
 fn pkce_pair() -> (String, String) {
