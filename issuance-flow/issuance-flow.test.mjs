@@ -11,6 +11,9 @@ import assert from "node:assert/strict";
 import {
   SUPPORTED_INVOCATIONS,
   SUPPORTED_STATES,
+  SUCCESS_STATES,
+  FAILURE_STATES,
+  OFFER_WINDOW_STATES,
   normalizeInvocations,
   validateHandle,
   IssuanceFlow,
@@ -27,39 +30,44 @@ const windowStub = {
   location: { assign: () => {} },
 };
 globalThis.window = windowStub;
-globalThis.document = {
-  createElement: () => ({
-    children: [],
-    dataset: {},
-    style: {},
-    append(...kids) {
-      this.children.push(...kids);
-    },
-    replaceChildren(...kids) {
-      this.children = kids;
-    },
-    replaceWith() {},
-    addEventListener() {},
-    setAttribute() {},
-    querySelector: () => null,
-    textContent: "",
-  }),
-};
 
-const element = () => {
+// One functional element factory for every stub surface (the document's
+// createElement AND the test roots): parent-tracked append and
+// replaceWith, so the module's slot swaps (launch → spinner → landing)
+// are observable in the tree. The module is DOM-thin; this is the whole
+// DOM it gets.
+const makeElement = (className = "") => {
   const el = Object.create(windowStub.HTMLElement.prototype);
   el.children = [];
+  el.className = className;
   el.dataset = {};
   el.style = {};
+  el.textContent = "";
   el.append = function (...kids) {
+    for (const kid of kids) if (kid && typeof kid === "object") kid.parent = this;
     this.children.push(...kids);
   };
   el.replaceChildren = function (...kids) {
-    this.children = kids;
+    this.children = [];
+    this.append(...kids);
+  };
+  el.replaceWith = function (...nodes) {
+    const at = this.parent ? this.parent.children.indexOf(this) : -1;
+    if (at === -1) return;
+    this.parent.children.splice(at, 1, ...nodes);
+    for (const node of nodes) node.parent = this.parent;
+  };
+  el.addEventListener = () => {};
+  el.setAttribute = (name, value) => {
+    el[name] = value;
   };
   el.querySelector = () => null;
   return el;
 };
+
+globalThis.document = { createElement: () => makeElement() };
+
+const element = () => makeElement();
 
 // ─── Vocabulary (§10.1) ─────────────────────────────────────────────────────
 
@@ -369,4 +377,378 @@ test("qrLogo with no server SVG keeps the fallback (the badge never renders with
   await flow.render("s1");
   const qr = qrCodeOf(root);
   assert.ok(!qr.children.some((kid) => kid.className === "qr-logo-wrap"), "no badge without a code");
+});
+
+// ─── Completion UX (§10.2.4) ─────────────────────────────────────────────────
+//
+// Sources of truth: design §10.2.3 (the §5.1 machine's user-visible arc —
+// offered → redeeming → (pending) → issued → accepted / failed / expired /
+// deleted) and §10.2.4 (completion UX: success/failure rendering from
+// state labels only; the app's next steps arrive via onTerminal). The
+// realeyes issuer proved the arc live (wia-probe: offered → redeeming →
+// issued, the credential_accepted notification → accepted).
+
+// The rendered section's row by class name (the state line, the slot).
+// The slot's rows carry compound classes (flow-landing flow-success) —
+// match by member, not by the whole string.
+const rowOf = (root, className) => {
+  const section = root.children[0];
+  return (
+    section?.children.find(
+      (kid) => typeof kid.className === "string" && kid.className.split(/\s+/).includes(className),
+    ) ?? null
+  );
+};
+
+test("the terminal classification covers the §5.1 machine's landing states", () => {
+  assert.deepEqual([...SUCCESS_STATES], ["issued", "accepted"]);
+  assert.deepEqual([...FAILURE_STATES], ["failed", "expired", "deleted"]);
+  // issued lands success: the credential was DELIVERED — the
+  // accepted notification that may follow refines the backend's
+  // record, not the UX.
+  for (const state of SUPPORTED_STATES) {
+    const flow = new IssuanceFlow({ root: element(), getSession: async () => ({}) });
+    const expected = SUCCESS_STATES.includes(state) || FAILURE_STATES.includes(state);
+    assert.equal(flow.isTerminal(state), expected, state);
+  }
+});
+
+test("deleted is part of the state vocabulary (the wallet CAN report removal)", () => {
+  assert.ok(SUPPORTED_STATES.includes("deleted"));
+  validateHandle({ session_id: "s", state: "deleted", offer_uri: "https://i.example/o/1" });
+});
+
+test("the launch surface retires to the spinner when the wallet engages", async () => {
+  const states = ["offered", "redeeming"];
+  let i = 0;
+  const root = element();
+  const flow = new IssuanceFlow({
+    root,
+    getSession: async () => ({
+      session_id: "s1",
+      state: states[Math.min(i, 1)],
+      offer_uri: "https://i.example/o/1",
+    }),
+    invocations: ["qr"],
+    pollMs: 1,
+  });
+  try {
+    await flow.render("s1");
+    assert.ok(rowOf(root, "wallet-launch"), "offered renders the launch surface");
+    assert.ok(!rowOf(root, "flow-spinner"));
+    i = 1;
+    await new Promise((r) => setTimeout(r, 30));
+    const spinner = rowOf(root, "flow-spinner");
+    assert.ok(spinner, "redeeming retires the launch for the spinner");
+    assert.ok(!rowOf(root, "wallet-launch"), "the QR and buttons are gone — the offer is spent");
+    assert.equal(spinner.role, "status");
+    assert.match(spinner.children.at(-1).textContent, /Waiting for your wallet/);
+  } finally {
+    flow.stop();
+  }
+});
+
+test("issued lands the success copy, hands the app the landing, and ends the watch", async () => {
+  const states = ["offered", "issued"];
+  let i = 0;
+  let fetches = 0;
+  const seen = [];
+  const root = element();
+  const flow = new IssuanceFlow({
+    root,
+    getSession: async () => {
+      fetches += 1;
+      return { session_id: "s1", state: states[Math.min(i, 1)], offer_uri: "https://i.example/o/1" };
+    },
+    invocations: ["qr"],
+    pollMs: 1,
+    onState: (state) => seen.push(state),
+    onTerminal: (state, handle, landing) => seen.push({ terminal: state, handle, landing }),
+  });
+  try {
+    await flow.render("s1");
+    i = 1;
+    await new Promise((r) => setTimeout(r, 30));
+    const landed = seen.find((s) => typeof s === "object");
+    assert.ok(landed, "onTerminal fired");
+    assert.equal(landed.terminal, "issued");
+    assert.equal(landed.handle.session_id, "s1");
+    assert.equal(landed.landing.className, "flow-landing flow-success");
+    assert.match(landed.landing.children[0].textContent, /Successfully delivered credential/);
+    // The watch ended: no further fetches after the landing.
+    const fetchesAtLanding = fetches;
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(fetches, fetchesAtLanding, "terminal ended the watch");
+    assert.ok(rowOf(root, "flow-landing"), "the landing holds the slot");
+  } finally {
+    flow.stop();
+  }
+});
+
+test("accepted lands the same success (the wallet confirmed receipt)", async () => {
+  const states = ["offered", "redeeming", "accepted"];
+  let i = 0;
+  const seen = [];
+  const root = element();
+  const flow = new IssuanceFlow({
+    root,
+    getSession: async () => ({
+      session_id: "s1",
+      state: states[Math.min(i, 2)],
+      offer_uri: "https://i.example/o/1",
+    }),
+    invocations: ["qr"],
+    pollMs: 1,
+    onTerminal: (state) => seen.push(state),
+  });
+  try {
+    await flow.render("s1");
+    i = 2;
+    await new Promise((r) => setTimeout(r, 30));
+    assert.deepEqual(seen, ["accepted"]);
+    assert.match(rowOf(root, "flow-landing").children[0].textContent, /Successfully delivered credential/);
+  } finally {
+    flow.stop();
+  }
+});
+
+test("failure states land the failure copy", async () => {
+  for (const [state, copy] of [
+    ["failed", /could not be delivered/],
+    ["expired", /expired before the wallet redeemed it/],
+    ["deleted", /removed the credential/],
+  ]) {
+    const states = ["offered", state];
+    let i = 0;
+    const root = element();
+    const flow = new IssuanceFlow({
+      root,
+      getSession: async () => ({
+        session_id: "s1",
+        state: states[Math.min(i, 1)],
+        offer_uri: "https://i.example/o/1",
+      }),
+      invocations: ["qr"],
+      pollMs: 1,
+    });
+    try {
+      await flow.render("s1");
+      i = 1;
+      await new Promise((r) => setTimeout(r, 30));
+      const landing = rowOf(root, "flow-landing");
+      assert.equal(landing.className, "flow-landing flow-failure", state);
+      assert.match(landing.children[0].textContent, copy);
+    } finally {
+      flow.stop();
+    }
+  }
+});
+
+test("an already-terminal session renders its landing without watching", async () => {
+  let fetches = 0;
+  const seen = [];
+  const root = element();
+  const flow = new IssuanceFlow({
+    root,
+    getSession: async () => {
+      fetches += 1;
+      return { session_id: "s1", state: "issued", offer_uri: "https://i.example/o/1" };
+    },
+    invocations: ["qr"],
+    pollMs: 1,
+    onTerminal: (state) => seen.push(state),
+  });
+  try {
+    await flow.render("s1");
+    assert.deepEqual(seen, ["issued"]);
+    assert.ok(rowOf(root, "flow-landing"), "the landing renders immediately");
+    assert.ok(!rowOf(root, "wallet-launch"), "no launch surface for a landed session");
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(fetches, 1, "no watch was started");
+  } finally {
+    flow.stop();
+  }
+});
+
+test("expires_at_unix renders the expiry (the issuer's session record form)", async () => {
+  const root = element();
+  const flow = new IssuanceFlow({
+    root,
+    getSession: async () => ({
+      session_id: "s1",
+      state: "offered",
+      offer_uri: "https://i.example/o/1",
+      expires_at_unix: 1795000000,
+    }),
+    invocations: ["qr"],
+  });
+  try {
+    await flow.render("s1");
+    const line = rowOf(root, "flow-state");
+    const time = line.children.find((kid) => kid.dateTime !== undefined);
+    assert.ok(time, "the expiry renders from the unix form");
+    assert.equal(time.dateTime, new Date(1795000000 * 1000).toISOString());
+  } finally {
+    flow.stop();
+  }
+});
+
+test("SSE frames drive the same transitions as polling (spinner, then landing)", async () => {
+  const instances = [];
+  class FakeEventSource {
+    constructor(url) {
+      this.url = url;
+      instances.push(this);
+    }
+    close() {
+      this.closed = true;
+    }
+  }
+  const offered = {
+    session_id: "s1",
+    state: "offered",
+    offer_uri: "https://i.example/o/1",
+    status: "/api/v1/issuance/sessions/s1/events",
+  };
+  const issued = { ...offered, state: "issued", status: undefined };
+  let fetches = 0;
+  const root = element();
+  const flow = new IssuanceFlow({
+    root,
+    getSession: async () => {
+      fetches += 1;
+      return fetches === 1 ? offered : issued;
+    },
+    invocations: ["qr"],
+    pollMs: 1,
+  });
+  globalThis.window = { ...windowStub, EventSource: FakeEventSource };
+  try {
+    await flow.render("s1");
+    const es = instances.at(-1);
+    assert.ok(es, "the SSE stream opened on the handle's status URL");
+    // The stream's initial full-handle frame repeats the rendered
+    // state: a no-op, not a duplicate emission or a slot swap.
+    es.onmessage({ data: JSON.stringify(offered) });
+    assert.ok(rowOf(root, "wallet-launch"), "the repeated frame changed nothing");
+    // Engagement: the spinner replaces the launch.
+    es.onmessage({ data: JSON.stringify({ session_id: "s1", state: "redeeming", unix: 1 }) });
+    assert.ok(rowOf(root, "flow-spinner"), "an in-flight frame retires the launch");
+    // Terminal: the landing needs the full fresh handle — the refresh
+    // fetch applies it.
+    es.onmessage({ data: JSON.stringify({ session_id: "s1", state: "issued", unix: 2 }) });
+    await new Promise((r) => setTimeout(r, 10));
+    const landing = rowOf(root, "flow-landing");
+    assert.ok(landing, "a terminal frame lands the flow");
+    assert.match(landing.children[0].textContent, /Successfully delivered credential/);
+    assert.ok(es.closed, "the stream closes at terminal");
+    assert.equal(fetches, 2, "the terminal frame triggered exactly one full-handle refresh");
+  } finally {
+    globalThis.window = windowStub;
+    flow.stop();
+  }
+});
+
+// ─── The offer window's countdown (§10.2.4) ───────────────────────────────────
+//
+// Source of truth: design §10.2.3 (the handle's expiry is part of the
+// vocabulary) + the offer-window classification — the expiry is the
+// user's live concern only while the offer is scannable; the countdown
+// floors at 0:00 and the backend's expired transition lands the state.
+
+test("OFFER_WINDOW_STATES is the offer-window classification", () => {
+  assert.deepEqual([...OFFER_WINDOW_STATES], ["awaiting_authorization", "offered"]);
+});
+
+test("the offer window renders a live m:ss countdown (either expiry form)", async () => {
+  for (const handle of [
+    { session_id: "s1", state: "offered", offer_uri: "https://i.example/o/1", expires_at: new Date(Date.now() + 14 * 60 * 1000).toISOString() },
+    { session_id: "s1", state: "offered", offer_uri: "https://i.example/o/1", expires_at_unix: Math.floor(Date.now() / 1000) + 14 * 60 },
+  ]) {
+    const root = element();
+    const flow = new IssuanceFlow({ root, getSession: async () => handle, invocations: ["qr"] });
+    try {
+      await flow.render("s1");
+      const line = rowOf(root, "flow-state");
+      const time = line.children.find((kid) => kid.className === "flow-countdown");
+      assert.ok(time, "the countdown renders inside the state line");
+      assert.match(time.textContent, /^\d{1,2}:\d{2}$/, `m:ss label, got ${time.textContent}`);
+      // The machine-readable instant rides the element either way.
+      assert.ok(time.dateTime?.startsWith("2"), "dateTime carries the ISO instant");
+    } finally {
+      flow.stop();
+    }
+  }
+});
+
+test("a countdown over an hour renders h:mm:ss; a past expiry floors at 0:00", async () => {
+  const cases = [
+    [new Date(Date.now() + 25 * 3600 * 1000).toISOString(), /^\d{1,3}:\d{2}:\d{2}$/],
+    [new Date(Date.now() - 60 * 1000).toISOString(), "0:00"],
+  ];
+  for (const [expiresAt, expected] of cases) {
+    const root = element();
+    const flow = new IssuanceFlow({
+      root,
+      getSession: async () => ({ session_id: "s1", state: "offered", offer_uri: "https://i.example/o/1", expires_at: expiresAt }),
+      invocations: ["qr"],
+    });
+    try {
+      await flow.render("s1");
+      const time = rowOf(root, "flow-state").children.find((kid) => kid.className === "flow-countdown");
+      assert.ok(time);
+      if (typeof expected === "string") assert.equal(time.textContent, expected);
+      else assert.match(time.textContent, expected);
+    } finally {
+      flow.stop();
+    }
+  }
+});
+
+test("the countdown ticks live and stops at zero (the backend lands the state)", async () => {
+  const expiresAt = new Date(Date.now() + 2000).toISOString();
+  const root = element();
+  const flow = new IssuanceFlow({
+    root,
+    getSession: async () => ({ session_id: "s1", state: "offered", offer_uri: "https://i.example/o/1", expires_at: expiresAt }),
+    invocations: ["qr"],
+  });
+  try {
+    await flow.render("s1");
+    const time = () => rowOf(root, "flow-state").children.find((kid) => kid.className === "flow-countdown");
+    const first = time().textContent;
+    assert.match(first, /^0:0\d$/);
+    await new Promise((r) => setTimeout(r, 1400)); // one tick in
+    const second = time().textContent;
+    assert.ok(second < first, `the label ticked down (${first} -> ${second})`);
+    await new Promise((r) => setTimeout(r, 2600)); // past zero
+    assert.equal(time().textContent, "0:00", "floored at zero, the ticker stopped");
+  } finally {
+    flow.stop();
+  }
+});
+
+test("the countdown is scoped to the offer window — engagement and landing drop it", async () => {
+  for (const state of ["redeeming", "pending", "issued", "accepted", "failed"]) {
+    const root = element();
+    const flow = new IssuanceFlow({
+      root,
+      getSession: async () => ({
+        session_id: "s1", state, offer_uri: "https://i.example/o/1",
+        expires_at: new Date(Date.now() + 14 * 60 * 1000).toISOString(),
+      }),
+      invocations: ["qr"],
+      pollMs: 1,
+    });
+    try {
+      await flow.render("s1");
+      const line = rowOf(root, "flow-state");
+      assert.ok(!line.children.some((kid) => kid.className === "flow-countdown"), `${state} carries no countdown`);
+      assert.ok(!line.children.some((kid) => typeof kid === "string" && kid.includes("expires")), `${state} carries no expiry text`);
+      flow.stop();
+    } catch (e) {
+      flow.stop();
+      throw e;
+    }
+  }
 });

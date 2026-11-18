@@ -49,6 +49,16 @@ const flow = new IssuanceFlow({
   onPreview: (handle) => myApp.renderConsent(handle),
   // Optional: observe state transitions (offered → issued → accepted…).
   onState: (state) => myApp.analytics(state),
+  // Optional: the flow's landing hook — append your own next steps to
+  // the landing node (the verifier link on success, the restart on
+  // failure). See "Status & completion UX".
+  onTerminal: (state, handle, landing) => {
+    if (state === "issued" || state === "accepted") {
+      landing.append(myApp.verifierLink());
+    } else {
+      landing.append(myApp.restartButton());
+    }
+  },
   // Optional: brand the QR — the issuer's or a partner's logo as a
   // centred badge over the server-rendered SVG (see "Branded QR").
   qrLogo: "/img/issuer-logo.png",
@@ -116,12 +126,56 @@ fallback). The overlay's geometry is inline (structural — it works
 without any app CSS); the `qr-logo-wrap`, `qr-logo-badge`, `qr-logo`
 class names let an app restyle it.
 
-### Status
+### Status & completion UX
 
 SSE when the backend exposes an events URL (`status`), polling as the
 fallback (and on SSE drop). The rendered subset is the session state
-machine's user-visible part: `offered → pending → issued → accepted /
-failed / expired`.
+machine's user-visible arc: `offered → redeeming → (pending) → issued →
+accepted / failed / expired / deleted`.
+
+**The launch surface retires when the wallet engages.** The QR and the
+buttons are dead weight once the offer is spent — `redeeming`/`pending`
+swaps them for a waiting spinner (a self-contained SMIL SVG, no CSS
+injection; restyle via `flow-spinner` / `flow-spinner-label`).
+
+**The flow lands on the terminal states:**
+
+| Landing | States | The outcome line |
+| --- | --- | --- |
+| Success | `issued`, `accepted` | "Successfully delivered credential" |
+| Failure | `failed`, `expired`, `deleted` | the failure copy ("The credential could not be delivered" / "The offer expired before the wallet redeemed it" / "The wallet removed the credential") |
+
+`onTerminal(state, handle, landing)` fires with the landing node —
+append your own next steps to it (the verifier link on success, the
+restart on failure). The landing carries
+`flow-landing flow-success|flow-failure` and `dataset.state` for your CSS.
+
+Terminal ends the watch: **`issued` is the UX's success** — the credential
+was delivered; the `credential_accepted` notification that may follow is
+the backend's record refinement, not a further UX state. A session
+rendered already-terminal lands immediately, with no watch started.
+
+**The offer window counts down.** While the offer is live
+(`awaiting_authorization`/`offered`), the state line carries a live
+`m:ss` countdown to the handle's expiry (either `expires_at` or
+`expires_at_unix`), inside a machine-readable `<time>` element
+(`datetime` = the ISO instant). It ticks once a second, renders
+`h:mm:ss` over an hour, floors at `0:00` — the backend's own `expired`
+transition (a poll or frame away) lands the failure — and is scoped to
+the offer window: past engagement the session's expiry is not the
+user's concern (the spinner and the landing own the screen, and the
+session's expiry is not the credential's validity).
+
+Your own offer affordances outside the module's root (a deep-link
+block, a copy-URI details) should retire with the launch surface —
+classify in `onState` with the exported `OFFER_WINDOW_STATES`:
+
+```js
+onState: (state) => {
+  document.querySelector("#offer-details").hidden =
+    !OFFER_WINDOW_STATES.includes(state);
+},
+```
 
 ## Test
 
