@@ -705,8 +705,12 @@ test("a countdown over an hour renders h:mm:ss; a past expiry floors at 0:00", a
   }
 });
 
-test("the countdown ticks live and stops at zero (the backend lands the state)", async () => {
-  const expiresAt = new Date(Date.now() + 2000).toISOString();
+test("the countdown ticks live (a wide CI margin: two tick windows)", async () => {
+  // The ticker is a 1-second chain; a LOADED CI runner can lag a timer
+  // by hundreds of ms, so the observation window carries TWO tick
+  // opportunities — any lag short of a full missed second still shows
+  // the label move.
+  const expiresAt = new Date(Date.now() + 5000).toISOString();
   const root = element();
   const flow = new IssuanceFlow({
     root,
@@ -717,12 +721,33 @@ test("the countdown ticks live and stops at zero (the backend lands the state)",
     await flow.render("s1");
     const time = () => rowOf(root, "flow-state").children.find((kid) => kid.className === "flow-countdown");
     const first = time().textContent;
-    assert.match(first, /^0:0\d$/);
-    await new Promise((r) => setTimeout(r, 1400)); // one tick in
+    assert.match(first, /^0:0[45]$/, `the window opens at ~5s: ${first}`);
+    await new Promise((r) => setTimeout(r, 2400)); // two tick windows
     const second = time().textContent;
     assert.ok(second < first, `the label ticked down (${first} -> ${second})`);
+  } finally {
+    flow.stop();
+  }
+});
+
+test("the countdown floors at zero and the ticker stops (the backend lands the state)", async () => {
+  // The floor check, decoupled from the tick check: a short window,
+  // a long settle, and the label pinned at 0:00 — the backend's own
+  // expired transition (a poll or frame away) is what lands the state.
+  const expiresAt = new Date(Date.now() + 1200).toISOString();
+  const root = element();
+  const flow = new IssuanceFlow({
+    root,
+    getSession: async () => ({ session_id: "s1", state: "offered", offer_uri: "https://i.example/o/1", expires_at: expiresAt }),
+    invocations: ["qr"],
+  });
+  try {
+    await flow.render("s1");
+    const time = () => rowOf(root, "flow-state").children.find((kid) => kid.className === "flow-countdown");
     await new Promise((r) => setTimeout(r, 2600)); // past zero
-    assert.equal(time().textContent, "0:00", "floored at zero, the ticker stopped");
+    assert.equal(time().textContent, "0:00", "floored at zero");
+    await new Promise((r) => setTimeout(r, 1300)); // and the ticker stopped
+    assert.equal(time().textContent, "0:00", "still 0:00 — the chain self-terminated");
   } finally {
     flow.stop();
   }

@@ -220,11 +220,7 @@ export class IssuanceFlow {
     // renders its landing (nothing to watch); an engaged wallet renders
     // the spinner (the offer is spent); anything else shows the launch
     // surface and the watch takes it from there.
-    this.slot = this.isTerminal(state)
-      ? this.renderLanding(handle)
-      : IN_FLIGHT_STATES.includes(state)
-        ? this.renderSpinner()
-        : this.renderLaunch(handle);
+    this.slot = this.slotFor(handle, state);
     this.root.replaceChildren();
     const section = document.createElement("section");
     section.className = "issuance-flow";
@@ -265,6 +261,17 @@ export class IssuanceFlow {
       window.setTimeout(tick, 1000);
     };
     window.setTimeout(tick, 1000);
+  }
+
+  // The slot for a state (Sonar S3358 wanted the nested ternary gone,
+  // and the branch table reads better as itself): a terminal session
+  // renders its landing (nothing to watch); an engaged wallet renders
+  // the spinner (the offer is spent); anything else shows the launch
+  // surface and the watch takes it from there.
+  slotFor(handle, state) {
+    if (this.isTerminal(state)) return this.renderLanding(handle);
+    if (IN_FLIGHT_STATES.includes(state)) return this.renderSpinner();
+    return this.renderLaunch(handle);
   }
 
   renderState(handle) {
@@ -518,8 +525,10 @@ export class IssuanceFlow {
           if (this.isTerminal(message.state)) {
             // A terminal frame carries only {session_id, state, unix};
             // the landing wants the full fresh handle — fetch and
-            // apply (the fetch's runId guard supersedes this frame's).
-            this.refresh(message.session_id ?? handle.session_id);
+            // apply (the fetch's runId guard supersedes this frame's;
+            // a failed fetch is the same supersession — the next poll
+            // or SSE frame re-lands, never an unhandled rejection).
+            this.refresh(message.session_id ?? handle.session_id).catch(() => {});
           } else {
             // An in-flight frame needs only the state; the rest of the
             // handle is already current.
