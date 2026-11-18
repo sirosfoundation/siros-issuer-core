@@ -189,7 +189,7 @@ pub fn issue(signer: &dyn crate::signer::Signer, spec: &IssueSpec) -> Result<Iss
         top.insert("cnf".into(), json!({ "jwk": public }));
     }
 
-    let mut header = JoseHeader::new("ES256");
+    let mut header = JoseHeader::new(crate::signer::JWS_ALG);
     header.typ = Some(spec.typ.to_owned());
     header.kid = signer.public_jwk()?.kid.clone();
     if !spec.x5c_der.is_empty() {

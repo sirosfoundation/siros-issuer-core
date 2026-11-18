@@ -64,6 +64,11 @@ pub struct ClientRegistry {
 }
 
 impl ClientRegistry {
+    /// No client is pre-registered (no `[authorization.clients.*]`).
+    pub fn is_empty(&self) -> bool {
+        self.clients.is_empty()
+    }
+
     pub fn client(&self, client_id: &str) -> Result<&ClientRegistration> {
         self.clients
             .get(client_id)
@@ -244,10 +249,13 @@ pub fn verify_private_key_jwt(
         &b64u_decode(h).map_err(|_| Error::new(code::INVALID_INPUT, "assertion header"))?,
     )
     .map_err(|e| Error::new(code::INVALID_INPUT, format!("assertion header: {e}")))?;
-    if header.get("alg").and_then(Value::as_str) != Some("ES256") {
+    if header.get("alg").and_then(Value::as_str) != Some(siros_issuer_core::signer::JWS_ALG) {
         return Err(Error::new(
             code::INVALID_INPUT,
-            "assertion alg is not ES256",
+            format!(
+                "assertion alg is not {}",
+                siros_issuer_core::signer::JWS_ALG
+            ),
         ));
     }
 

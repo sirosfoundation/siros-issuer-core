@@ -15,6 +15,15 @@ use crate::error::{code, Error, Result};
 use jose_rs::jwk::Jwk;
 use jose_rs::JoseHeader;
 
+/// The one JWS algorithm (RFC 7518 §3.4, ECDSA P-256 + SHA-256) this
+/// issuer signs with and accepts from wallets and clients: the issuer
+/// metadata and AS metadata advertise it, every signature it produces
+/// uses it, and every verifier (client assertions, wallet attestations
+/// and their PoP, key attestations, proofs, DPoP) refuses anything
+/// else. One value, so what is advertised and what is verified cannot
+/// drift apart. Supporting another algorithm starts here.
+pub const JWS_ALG: &str = "ES256";
+
 /// One signing surface: compact ES256 JWTs with a caller-supplied header.
 pub trait Signer: Send + Sync {
     /// Sign `payload` under `header` and return the compact JWT. The

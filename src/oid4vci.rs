@@ -425,10 +425,10 @@ fn sd_jwt_configuration(
         proof_types_supported: BTreeMap::from([(
             "jwt",
             ProofType {
-                proof_signing_alg_values_supported: vec!["ES256"],
+                proof_signing_alg_values_supported: vec![crate::signer::JWS_ALG],
             },
         )]),
-        credential_signing_alg_values_supported: serde_json::json!(["ES256"]),
+        credential_signing_alg_values_supported: serde_json::json!([crate::signer::JWS_ALG]),
         auxiliary_data_supported: auxiliary_data.cloned(),
     }
 }
@@ -471,13 +471,13 @@ fn mdoc_configuration(
             (
                 "jwt",
                 ProofType {
-                    proof_signing_alg_values_supported: vec!["ES256"],
+                    proof_signing_alg_values_supported: vec![crate::signer::JWS_ALG],
                 },
             ),
             (
                 "attestation",
                 ProofType {
-                    proof_signing_alg_values_supported: vec!["ES256"],
+                    proof_signing_alg_values_supported: vec![crate::signer::JWS_ALG],
                 },
             ),
         ]),
@@ -516,10 +516,23 @@ pub struct AuthorizationServerMetadata {
     pub grant_types_supported: Vec<&'static str>,
     pub response_types_supported: Vec<&'static str>,
     pub code_challenge_methods_supported: Vec<&'static str>,
-    /// Public clients only: `client_id` + PKCE, no client secret
-    /// (OAuth 2.1 posture; the suite's and the vc profile's clients are
-    /// public).
+    /// RFC 8414: the client authentication methods the token endpoint
+    /// accepts. Empty from [`authorization_server_metadata`]; the service
+    /// adds each method only when its configuration accepts it
+    /// ([`Self::advertise_private_key_jwt`],
+    /// [`Self::advertise_client_attestation`],
+    /// [`Self::advertise_public_clients`]). Always serialized: RFC 8414
+    /// §2 defaults an omitted member to `client_secret_basic`, which the
+    /// token endpoint never accepts, so an empty array is the honest
+    /// wire form of "no method configured".
     pub token_endpoint_auth_methods_supported: Vec<&'static str>,
+    /// draft-ietf-oauth-attestation-based-client-auth-07 §10.1/§13.3:
+    /// MUST be present when `attest_jwt_client_auth` is advertised.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_attestation_signing_alg_values_supported: Option<Vec<&'static str>>,
+    /// draft-ietf-oauth-attestation-based-client-auth-07 §10.1/§13.3.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_attestation_pop_signing_alg_values_supported: Option<Vec<&'static str>>,
     /// RFC 9449 DPoP.
     pub dpop_signing_alg_values_supported: Vec<&'static str>,
     /// RFC 9396 authorization details types (the suite requires
@@ -563,10 +576,58 @@ pub fn authorization_server_metadata(issuer_base: &Url) -> Result<AuthorizationS
         grant_types_supported: vec![GRANT_AUTHORIZATION_CODE, GRANT_PRE_AUTHORIZED_CODE],
         response_types_supported: vec!["code"],
         code_challenge_methods_supported: vec!["S256"],
-        token_endpoint_auth_methods_supported: vec!["none"],
-        dpop_signing_alg_values_supported: vec!["ES256"],
+        token_endpoint_auth_methods_supported: Vec::new(),
+        client_attestation_signing_alg_values_supported: None,
+        client_attestation_pop_signing_alg_values_supported: None,
+        dpop_signing_alg_values_supported: vec![crate::signer::JWS_ALG],
         authorization_details_types_supported: vec!["openid_credential"],
     })
+}
+
+/// RFC 7523 §2.2 / RFC 8414: JWT client assertions.
+pub const TOKEN_AUTH_PRIVATE_KEY_JWT: &str = "private_key_jwt";
+/// draft-ietf-oauth-attestation-based-client-auth-07 §13.4.
+pub const TOKEN_AUTH_ATTEST_JWT_CLIENT_AUTH: &str = "attest_jwt_client_auth";
+/// RFC 7591 §2: a public client (no client authentication).
+pub const TOKEN_AUTH_NONE: &str = "none";
+
+impl AuthorizationServerMetadata {
+    /// RFC 7523 JWT client assertions are accepted at the token endpoint:
+    /// at least one client is pre-registered with keys to verify them
+    /// against. Without a registered client no assertion can verify, so
+    /// the method is not advertised.
+    pub fn advertise_private_key_jwt(&mut self) {
+        self.token_endpoint_auth_methods_supported
+            .push(TOKEN_AUTH_PRIVATE_KEY_JWT);
+    }
+
+    /// Attestation-based client authentication is accepted at the token
+    /// endpoint: advertise the method and, as draft-ietf-oauth-
+    /// attestation-based-client-auth-07 §10.1 requires with it, the
+    /// algorithms for the attestation and its PoP (ES256, the one alg the
+    /// token endpoint verifies).
+    pub fn advertise_client_attestation(&mut self) {
+        self.token_endpoint_auth_methods_supported
+            .push(TOKEN_AUTH_ATTEST_JWT_CLIENT_AUTH);
+        self.client_attestation_signing_alg_values_supported = Some(vec![crate::signer::JWS_ALG]);
+        self.client_attestation_pop_signing_alg_values_supported =
+            Some(vec![crate::signer::JWS_ALG]);
+    }
+
+    /// A token request without client authentication is accepted (the
+    /// pre-authorized grant's `optional` posture).
+    ///
+    /// Scope: only the pre-authorized_code grant tolerates an absent
+    /// client authentication; the authorization_code grant never relaxes
+    /// (its client was authenticated at PAR). RFC 8414 has no per-grant
+    /// form of `token_endpoint_auth_methods_supported`, so the member
+    /// lists `none` for the endpoint as a whole; a client on the
+    /// authorization_code grant that sends no authentication is still
+    /// refused with `invalid_client`.
+    pub fn advertise_public_clients(&mut self) {
+        self.token_endpoint_auth_methods_supported
+            .push(TOKEN_AUTH_NONE);
+    }
 }
 
 // ─── Credential offer (ID1 §4.1) ─────────────────────────────────────────
@@ -1019,7 +1080,13 @@ pub const SIGNED_METADATA_TYP: &str = "openidvci-issuer-metadata+jwt";
 /// byte-identical to `credential_issuer` (§12.2.3 discipline); `iss` the
 /// same (string); `iat`/`exp` the signing time and window — and whose
 /// header carries `typ: openidvci-issuer-metadata+jwt` and the signing
-/// key (`jwk` — public members only, never `d`). The suite's
+/// key (`jwk` — public members only, never `d`) plus, when the
+/// deployment configures one, the issuer certificate chain as `x5c`
+/// (RFC 7515 §4.1.6: leaf first, standard base64 DER) — the same chain
+/// the issued SD-JWTs carry. A trust-list wallet anchors the metadata
+/// signer through that chain (TS 119 602 lists certificates, not bare
+/// keys); the WE BUILD ITB+ trust suite refuses signed metadata without
+/// it. The suite's
 /// `VCIDecodeSignedCredentialIssuerMetadata` verifies the JWS against
 /// the header key, checks `sub` against the configured issuer
 /// identifier, strips the four JWT claims, and runs the standard
@@ -1035,6 +1102,7 @@ pub fn signed_metadata_jws(
     now: i64,
     validity_secs: i64,
     signer: &dyn crate::signer::Signer,
+    x5c_der: &[Vec<u8>],
 ) -> Result<String> {
     let mut payload = serde_json::to_value(metadata)
         .map_err(|e| crate::Error::invalid_input(format!("metadata serialization: {e}")))?;
@@ -1051,7 +1119,7 @@ pub fn signed_metadata_jws(
     let payload = serde_json::to_vec(&payload)
         .map_err(|e| crate::Error::invalid_input(format!("metadata serialization: {e}")))?;
     let public = signer.public_jwk()?;
-    let mut header = jose_rs::JoseHeader::new("ES256");
+    let mut header = jose_rs::JoseHeader::new(crate::signer::JWS_ALG);
     header.typ = Some(SIGNED_METADATA_TYP.to_owned());
     // The verification key rides the header (the suite accepts jwk or
     // x5c; the public JWK is the portable shape). `d` cannot be present:
@@ -1060,5 +1128,14 @@ pub fn signed_metadata_jws(
         serde_json::to_value(&public)
             .map_err(|e| crate::Error::invalid_input(format!("public jwk serialization: {e}")))?,
     );
+    if !x5c_der.is_empty() {
+        use base64::Engine as _;
+        header.x5c = Some(
+            x5c_der
+                .iter()
+                .map(|der| base64::engine::general_purpose::STANDARD.encode(der))
+                .collect(),
+        );
+    }
     signer.sign_es256(&header, &payload)
 }

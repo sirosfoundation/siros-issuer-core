@@ -258,16 +258,12 @@ impl WalletAttestationEvaluator {
             &b64u_decode(h).map_err(|_| Error::new(code::INVALID_INPUT, "attestation header"))?,
         )
         .map_err(|e| Error::new(code::INVALID_INPUT, format!("attestation header: {e}")))?;
-        let alg = header
+        let alg: String = header
             .get("alg")
             .and_then(Value::as_str)
-            .unwrap_or_default();
-        if !matches!(alg, "ES256") {
-            return Err(Error::new(
-                code::INVALID_INPUT,
-                format!("attestation alg {alg:?} is not ES256"),
-            ));
-        }
+            .unwrap_or_default()
+            .to_owned();
+        crate::auth::require_jws_alg(&alg, "attestation")?;
 
         // x5c: verify against the leaf (ETSI). The chain's trust is the
         // PDP's to judge (this is signature verification only).
@@ -512,6 +508,9 @@ fn parse_attestation_identity(attestation: &str) -> Result<AttestationIdentity> 
     Ok(identity)
 }
 
+/// A JWS header's alg must be the one alg this module speaks (ES256) —
+/// one refusal shape across the attestation header checks (Sonar's
+/// duplication gate: the same 4-line check appeared twice).
 /// The x5c leaf's wallet-provider identity (vc `issuerFromX5CLeaf`):
 /// SAN DNS name > SAN URI > Subject CN.
 ///
@@ -707,7 +706,7 @@ fn leaf_to_jwk(key: &p256::ecdsa::VerifyingKey) -> Result<jose_rs::jwk::Jwk> {
         "crv": "P-256",
         "x": siros_issuer_core::sdjwt_issue::b64u(x),
         "y": siros_issuer_core::sdjwt_issue::b64u(y),
-        "alg": "ES256",
+        "alg": siros_issuer_core::signer::JWS_ALG,
         "use": "sig",
     }))
     .map_err(|e| Error::new(code::INVALID_INPUT, format!("leaf jwk: {e}")))

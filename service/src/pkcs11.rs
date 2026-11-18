@@ -104,7 +104,7 @@ impl Pkcs11SignerProvider {
         // ES256 is the one issuer algorithm (advertised everywhere);
         // kryptering validates the key's curve (CKA_EC_PARAMS) against it
         // at handle time.
-        let algorithm = jose_rs::JwsAlgorithm::from_str("ES256")
+        let algorithm = jose_rs::JwsAlgorithm::from_str(siros_issuer_core::signer::JWS_ALG)
             .expect("ES256 is a known JWS algorithm")
             .to_crypto()
             .expect("ES256 maps to a crypto algorithm");
@@ -202,7 +202,7 @@ fn public_jwk(session: &Pkcs11Session, label: &str, kid: &str) -> Result<jose_rs
         "x": siros_issuer_core::sdjwt_issue::b64u(x),
         "y": siros_issuer_core::sdjwt_issue::b64u(y),
         "kid": kid,
-        "alg": "ES256",
+        "alg": siros_issuer_core::signer::JWS_ALG,
         "use": "sig",
     }))
     .map_err(|e| Error::configuration(format!("public jwk: {e}")))

@@ -164,6 +164,7 @@ pub async fn credential_issuer_metadata(
             crate::status::now_unix(),
             3600,
             state.signer.as_ref(),
+            &state.cert_chain_der,
         ) {
             Ok(jws) => jws,
             Err(error) => return err(error),
@@ -190,6 +191,20 @@ pub async fn oauth_authorization_server(
     // metadata lie (the #4 principle).
     if state.refresh_token.is_some() {
         metadata.grant_types_supported.push(GRANT_REFRESH_TOKEN);
+    }
+    // The token endpoint's client-auth methods, as `token` accepts them:
+    // private_key_jwt only with a registered client to verify against;
+    // WIA headers only with the evaluator configured; no client auth
+    // only under the pre-authorized grant's `optional` posture (that
+    // grant only — see `advertise_public_clients`).
+    if !state.clients.is_empty() {
+        metadata.advertise_private_key_jwt();
+    }
+    if state.wallet_attestation.is_some() {
+        metadata.advertise_client_attestation();
+    }
+    if state.pre_authorized_client_auth == crate::config::PreAuthorizedClientAuth::Optional {
+        metadata.advertise_public_clients();
     }
     Json(metadata)
 }
@@ -222,7 +237,7 @@ pub async fn jwks(State(state): State<AppState>) -> (StatusCode, Json<Value>) {
     // HSM session surfaces as a 503 with the stable code.
     match state.signer.public_jwk() {
         Ok(mut public) => {
-            public.alg = Some("ES256".to_owned());
+            public.alg = Some(siros_issuer_core::signer::JWS_ALG.to_owned());
             (StatusCode::OK, Json(json!({"keys": [public]})))
         }
         Err(error) => (

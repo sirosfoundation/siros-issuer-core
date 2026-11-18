@@ -173,7 +173,9 @@ fn proof_types_follow_the_format() {
 
 /// Discovery advertises the implemented P2 surface (design §12.1): both
 /// grants (PAR + Mode A authorize for authorization_code), PKCE S256,
-/// public-client auth, and DPoP (RFC 9449) for sender-constraining. The
+/// no client-auth method until the deployment adds one (RFC 8414 §2:
+/// the member is present, as an empty array, so it never defaults to
+/// client_secret_basic), and DPoP (RFC 9449) for sender-constraining. The
 /// authorization-challenge endpoint (Mode B) is absent until it lands.
 #[test]
 fn authorization_server_metadata_advertises_the_p2_surface() {
@@ -186,7 +188,7 @@ fn authorization_server_metadata_advertises_the_p2_surface() {
         ]
     );
     assert_eq!(metadata.code_challenge_methods_supported, vec!["S256"]);
-    assert_eq!(metadata.token_endpoint_auth_methods_supported, vec!["none"]);
+    assert!(metadata.token_endpoint_auth_methods_supported.is_empty());
     assert_eq!(metadata.dpop_signing_alg_values_supported, vec!["ES256"]);
     assert_eq!(
         metadata.authorization_endpoint.as_str(),
@@ -197,8 +199,35 @@ fn authorization_server_metadata_advertises_the_p2_surface() {
         "https://issuer.example.org/op/par"
     );
     let wire = serde_json::to_value(&metadata).unwrap();
+    assert_eq!(wire["token_endpoint_auth_methods_supported"], json!([]));
     // Mode B (design §7.3) is not advertised until implemented.
     assert!(wire.get("authorization_challenge_endpoint").is_none());
+    // No attestation-based client auth without it being enabled.
+    assert!(wire
+        .get("client_attestation_signing_alg_values_supported")
+        .is_none());
+}
+
+/// draft-ietf-oauth-attestation-based-client-auth-07 §10.1: advertising
+/// attest_jwt_client_auth MUST carry both alg members, as JSON arrays
+/// (§13.3) — ES256, the one alg the token endpoint verifies.
+#[test]
+fn client_attestation_advertises_method_and_alg_arrays() {
+    let mut metadata = authorization_server_metadata(&issuer_base()).unwrap();
+    metadata.advertise_client_attestation();
+    let wire = serde_json::to_value(&metadata).unwrap();
+    assert_eq!(
+        wire["token_endpoint_auth_methods_supported"],
+        json!(["attest_jwt_client_auth"])
+    );
+    assert_eq!(
+        wire["client_attestation_signing_alg_values_supported"],
+        json!(["ES256"])
+    );
+    assert_eq!(
+        wire["client_attestation_pop_signing_alg_values_supported"],
+        json!(["ES256"])
+    );
 }
 
 /// A document whose URI is not declared by its schema is refused with the

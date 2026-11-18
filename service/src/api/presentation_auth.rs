@@ -61,7 +61,7 @@ struct KrypteringSignerAdapter {
 
 impl kryptering::Signer for KrypteringSignerAdapter {
     fn algorithm(&self) -> kryptering::SignatureAlgorithm {
-        jose_rs::JwsAlgorithm::from_str("ES256")
+        jose_rs::JwsAlgorithm::from_str(siros_issuer_core::signer::JWS_ALG)
             .expect("ES256 is a known JWS algorithm")
             .to_crypto()
             .expect("ES256 maps to a crypto algorithm")
@@ -202,7 +202,7 @@ pub async fn authorization_challenge(
             client_id: None,
         },
         &signer,
-        "ES256",
+        siros_issuer_core::signer::JWS_ALG,
         &state.cert_chain_der,
         now,
     )

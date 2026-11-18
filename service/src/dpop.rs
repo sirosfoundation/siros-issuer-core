@@ -125,10 +125,14 @@ impl DpopValidator {
                 format!("DPoP typ {:?} is not dpop+jwt", header.typ),
             ));
         }
-        if header.alg != "ES256" {
+        if header.alg != siros_issuer_core::signer::JWS_ALG {
             return Err(Error::new(
                 code::INVALID_INPUT,
-                format!("DPoP alg {} is not ES256 (as advertised)", header.alg),
+                format!(
+                    "DPoP alg {} is not {} (as advertised)",
+                    header.alg,
+                    siros_issuer_core::signer::JWS_ALG
+                ),
             ));
         }
         let jwk_value = header

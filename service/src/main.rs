@@ -39,7 +39,7 @@ fn build_signer(
         }
     };
     if jwk.alg.is_none() {
-        jwk.alg = Some("ES256".to_owned());
+        jwk.alg = Some(siros_issuer_core::signer::JWS_ALG.to_owned());
     }
     if jwk.kid.is_none() {
         jwk.kid = Some(

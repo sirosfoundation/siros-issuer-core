@@ -107,7 +107,7 @@ impl SirosStatusClient {
             "exp": now + 300,
             "jti": format!("{kid}{}", now),
         });
-        let mut header = jose_rs::JoseHeader::new("ES256");
+        let mut header = jose_rs::JoseHeader::new(siros_issuer_core::signer::JWS_ALG);
         header.kid = Some(kid);
         // Embed the public JWK (RFC 7523 §3 / the AS's clientassertion
         // verifies against the header's key material — jwk or x5c; a bare
