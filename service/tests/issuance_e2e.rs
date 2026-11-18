@@ -5248,3 +5248,134 @@ static_dir = "."
     .expect("opt-out config parses");
     assert!(!cfg.issuer.response_encryption_required);
 }
+
+// ─── Issue #24: Final §7.3's request shape — alg is not a member ─────────
+
+/// The engine's shipping shape (the wire form, tcpdump'd on #24): the
+/// two-member offer {jwk, enc} — Final §7.3 defines the request object
+/// without `alg` (the algorithm is the issuer's choice, rides the JWE
+/// header). The issuer selects ECDH-ES from its own
+/// alg_values_supported, mints the JWE, and the wallet's key decrypts
+/// it — the JWE header carries the chosen alg.
+#[tokio::test]
+async fn final_shaped_encryption_offer_without_alg_round_trips() {
+    let allocator = Arc::new(RecordingAllocator {
+        list_url: Url::parse("http://127.0.0.1:9/lists/test-list").unwrap(),
+        next_index: AtomicU64::new(7),
+        updates: Mutex::new(Vec::new()),
+    });
+    let service = spawn_service(Arc::new(PermitPdp), allocator, test_signer()).await;
+    let (created, _) = create_session(
+        &service,
+        &ec_key(),
+        json!({"credential": "urn:eudi:pid:1", "subject": {"given_name": "A", "family_name": "B"}}),
+    )
+    .await;
+    let body: Value = created.json().await.unwrap();
+    let offer_uri = body["offer_uri"].as_str().unwrap().to_owned();
+
+    let client = reqwest::Client::new();
+    let offer: Value = client
+        .get(format!(
+            "{}{}",
+            service.base,
+            offer_uri.trim_start_matches(ISSUER_BASE)
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let code = offer["grants"][GRANT_PRE_AUTHORIZED_CODE]["pre-authorized_code"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let token: Value = client
+        .post(format!("{}/token", service.base))
+        .form(&token_form(&[
+            ("grant_type", GRANT_PRE_AUTHORIZED_CODE.to_owned()),
+            ("pre_authorized_code", code),
+        ]))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let access_token = token["access_token"].as_str().unwrap().to_owned();
+    let c_nonce = token["c_nonce"].as_str().unwrap().to_owned();
+
+    let holder = ec_key();
+    let proof = proof_jwt(&holder, &Url::parse(ISSUER_BASE).unwrap(), &c_nonce);
+    // The FINAL shape: {jwk, enc} — no alg member at all.
+    let response = client
+        .post(format!("{}/credential", service.base))
+        .bearer_auth(&access_token)
+        .json(&json!({
+            "credential_configuration_id": "urn:eudi:pid:1",
+            "proof": { "proof_type": "jwt", "jwt": proof },
+            "credential_response_encryption": {
+                "jwk": holder.to_public_jwk(),
+                "enc": "A128GCM",
+            },
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    assert!(
+        status.is_success(),
+        "the Final-shaped offer answers: {status}"
+    );
+    let jwe = response.text().await.unwrap();
+    assert_eq!(jwe.split('.').count(), 5, "the response is a JWE: {jwe}");
+    // The protected header carries the issuer-chosen alg (ECDH-ES —
+    // selected from the issuer's own alg_values_supported).
+    let protected = jwe.split('.').next().unwrap();
+    let header: Value =
+        serde_json::from_slice(&siros_issuer_core::sdjwt_issue::b64u_decode(protected).unwrap())
+            .unwrap();
+    assert_eq!(
+        header["alg"], "ECDH-ES",
+        "the issuer's choice rides the JWE header"
+    );
+    // And the wallet's key decrypts it.
+    let decrypted =
+        siros_issuer_core::response::decrypt_response(&jwe, &holder).expect("the wallet decrypts");
+    let credential: Value = serde_json::from_slice(&decrypted).unwrap();
+    assert!(
+        credential["credentials"][0]["credential"].is_string(),
+        "{credential}"
+    );
+}
+
+/// A WRONG alg, when the draft-era three-member shape IS sent, still
+/// refuses (the advertised-suites rule); and a malformed request body
+/// answers 400 — a client error, never the 500 of issue #24's wire.
+#[tokio::test]
+async fn wrong_alg_still_refuses_and_parse_failures_answer_400() {
+    let allocator = Arc::new(RecordingAllocator {
+        list_url: Url::parse("http://127.0.0.1:9/lists/test-list").unwrap(),
+        next_index: AtomicU64::new(7),
+        updates: Mutex::new(Vec::new()),
+    });
+    let service = spawn_service(Arc::new(PermitPdp), allocator, test_signer()).await;
+    let client = reqwest::Client::new();
+
+    // A malformed body: 400, never 500.
+    let response = client
+        .post(format!("{}/credential", service.base))
+        .header("content-type", "application/json")
+        .body("this is not a credential request")
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(
+        status,
+        reqwest::StatusCode::BAD_REQUEST,
+        "a parse failure is a 400 (issue #24's 500): {body}"
+    );
+}

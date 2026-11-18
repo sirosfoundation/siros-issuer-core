@@ -33,6 +33,10 @@ fn err(error: Error) -> Response {
     use siros_issuer_core::error::code;
     let status = match error.code {
         code::INVALID_INPUT => StatusCode::BAD_REQUEST,
+        // A malformed credential request is a 400, never a 500 (issue
+        // #24: the engine's Final-shaped offer {jwk, enc} answered
+        // 500 invalid_credential_request — a client error class).
+        code::INVALID_CREDENTIAL_REQUEST => StatusCode::BAD_REQUEST,
         code::UNSUPPORTED_CREDENTIAL => StatusCode::NOT_FOUND,
         code::ILLEGAL_TRANSITION => StatusCode::CONFLICT,
         code::CONFIGURATION => StatusCode::SERVICE_UNAVAILABLE,
@@ -1024,7 +1028,16 @@ fn credential_response(
 
     // ECDHE-ES encryption when requested (and only the advertised suites).
     if let Some(encryption) = encryption {
-        if encryption.alg != "ECDH-ES" || encryption.enc != "A128GCM" {
+        // Final §7.3 (issue #24): the algorithm is NOT a request member —
+        // the offer is {jwk, enc, zip?}. Absent ⇒ the issuer selects from
+        // its own alg_values_supported (ECDH-ES — the one it mints with);
+        // the draft-era three-member shape is still accepted and validated.
+        if encryption
+            .alg
+            .as_deref()
+            .is_some_and(|alg| alg != "ECDH-ES")
+            || encryption.enc != "A128GCM"
+        {
             return Err(credential_err(
                 state,
                 &Error::invalid_input("only alg ECDH-ES enc A128GCM are supported (as advertised)"),

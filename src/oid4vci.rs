@@ -661,7 +661,14 @@ pub struct Proof {
 #[derive(Debug, Deserialize)]
 pub struct CredentialResponseEncryption {
     pub jwk: serde_json::Value,
-    pub alg: String,
+    /// NOT a member of the Final §7.3 request object (issue #24):
+    /// Final defines the offer as {jwk, enc, zip?} — the key management
+    /// algorithm is the ISSUER's choice, rides the JWE header, and is
+    /// selected from the issuer's own alg_values_supported. The
+    /// draft-era three-member shape (alg in the request) is still
+    /// accepted — the suite sends it — and validated when present.
+    #[serde(default)]
+    pub alg: Option<String>,
     pub enc: String,
 }
 
