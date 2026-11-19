@@ -231,3 +231,14 @@ challenge_per_minute = 20   # POST authorization-challenge (+ Mode B response)
 #
 # [zk]
 # advertise_auxiliary_data = false
+
+# ── OpenTelemetry (gap 5: the observability spine) ────────────────────────
+# [telemetry]
+# The OTLP/gRPC collector endpoint (REQUIRES the otlp build feature; the
+# endpoint without the feature refuses at startup). Absent ⇒ logs only
+# (EnvFilter: RUST_LOG, default info) — the conformance profile's
+# surface unchanged. Spans carry identifiers only (session ids, grant
+# types, state labels) — never claims, proofs, or tokens (the §13.3
+# PII discipline).
+# otlp_endpoint = "http://otel-collector:4317"
+# service_name = "siros-issuer-service"

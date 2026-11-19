@@ -66,14 +66,14 @@ fn main() {
 
 async fn run(config_path: &str) -> siros_issuer_core::Result<()> {
     use std::sync::{Arc, RwLock};
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
 
     let config = Config::load(std::path::Path::new(config_path))?;
+
+    // Gap 5: the telemetry spine initializes when the config is in hand
+    // (before anything serves); the guard lives for the run's lifetime
+    // (dropping it flushes the exporter). A failed OTLP init downgrades
+    // to logs-only; an endpoint without the `otlp` feature refuses.
+    let _telemetry = siros_issuer_service::telemetry::init(&config.telemetry)?;
     let source = fetch::CatalogSource::from_config(&config.catalog)?;
 
     // Fail-closed startup: no catalog, no service (design §8.1).

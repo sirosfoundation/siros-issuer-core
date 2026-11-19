@@ -633,6 +633,11 @@ pub async fn token(
         }
     };
 
+    // Gap 5: the issuance surfaces trace identifiers only (the PII
+    // discipline, §13.3's audit): grant type + session id — never the
+    // code, proof, or claim material crossing this handler.
+    tracing::info_span!("token", grant = %grant_type, session = %record.id.as_str());
+
     // Mint the access token (hashed at rest) and rotate the c_nonce.
     let access_token = random_handle("at_", 24);
     let c_nonce = random_handle("n_", 16);
@@ -798,6 +803,9 @@ async fn credential_inner(
         .await
         .ok_or_else(|| err(Error::invalid_input("unknown or expired access token")))?;
     enforce_sender_constrained_token(&state, &headers, &dpop_jkt, "credential", now).await?;
+    // Gap 5: identifiers only (the §13.3 discipline) — the session id
+    // and the configuration asked for; never the proof or the claims.
+    tracing::info_span!("credential", session = %session_id.as_str());
     let record = state.sessions.get(&session_id).await.ok_or_else(|| {
         credential_err(
             &state,

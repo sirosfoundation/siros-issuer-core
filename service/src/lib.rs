@@ -17,6 +17,7 @@ pub mod pkcs11;
 pub mod rate_limit;
 pub mod status;
 pub mod store;
+pub mod telemetry;
 pub mod vault;
 pub mod wallet_attestation;
 pub mod zk_load;

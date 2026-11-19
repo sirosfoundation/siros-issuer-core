@@ -9,6 +9,12 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// OpenTelemetry-line observability (gap 5): `[telemetry]` — the
+    /// tracing spine (EnvFilter/RUST_LOG) + the optional OTLP exporter
+    /// (the `otlp` feature; the endpoint without the feature refuses
+    /// at startup). Absent ⇒ logs only.
+    #[serde(default)]
+    pub telemetry: crate::telemetry::TelemetryCfg,
     pub issuer: IssuerCfg,
     #[serde(default)]
     pub signing: SigningCfg,
