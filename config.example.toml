@@ -184,8 +184,19 @@ challenge_per_minute = 20   # POST authorization-challenge (+ Mode B response)
 # false is for wallet fleets that cannot encrypt (the conformance
 # profile's plain variants). A to_wallet auxiliary-data opening is
 # refused in the clear EITHER way (endpoint-enforced).
-# [issuer]
 # response_encryption_required = true
+# ── The ARF disclosure policy (gap 3: CIR 2024/2979 Annex III / ETSI TS
+#    119 472-3 §4.2.5) ── per-credential, absent by default (the
+#    conformance schema's closed set; no stable normative layout yet —
+#    openid/OpenID4VCI#384). Three policy types: none (default),
+#    authorized_relying_parties (the EU-wide unique RP identifiers),
+#    specific_root_of_trust (SHA-256 root fingerprints, hex, 64 chars).
+# [issuer.disclosure_policies."eu.europa.ec.eudi.nym_auth.1"]
+# policy_type = "authorized_relying_parties"
+# authorized_relying_parties = ["RP-SE-000001"]
+# [issuer.disclosure_policies."urn:eudi:pid:1"]
+# policy_type = "specific_root_of_trust"
+# trusted_roots = ["5a439d1...64-hex-chars..."]
 
 # ── Pre-auth strong binding (design §6.5 v2) ──────────────────────────────
 # Present ⇒ the pre-authorized grant demands a PID presentation before
