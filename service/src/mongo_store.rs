@@ -188,11 +188,7 @@ impl MongoStore {
     #[cfg(feature = "mongo")]
     pub async fn index_names(&self) -> Result<Vec<String>> {
         use futures_util::StreamExt;
-        let mut cursor = self
-            .sessions
-            .list_indexes()
-            .await
-            .map_err(mongo_error)?;
+        let mut cursor = self.sessions.list_indexes().await.map_err(mongo_error)?;
         let mut names = Vec::new();
         while let Some(doc) = cursor.next().await {
             let doc = doc.map_err(mongo_error)?;
