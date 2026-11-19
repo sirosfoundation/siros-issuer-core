@@ -2158,7 +2158,16 @@ fn derive_to_wallet(
                 commitment: None,
                 opening: Some(siros_issuer_core::sdjwt_issue::b64u(&opening_bytes)),
                 required: false,
-                encoding: entry.encoding.clone(),
+                // Issue #39: the DELIVERED entry carries only the
+                // rulebook's §4.1 type vocabulary — {type, alg, path,
+                // opening}; `encoding` is the issuer CONFIG's (and the
+                // metadata advertisement's) member, never the response
+                // entry's (the opening is base64url by spec fiat). The
+                // configured encoding rode the response and every
+                // strict wallet refused the receipt check ("the
+                // delivered metadata is malformed" — siros-sdk-kotlin's
+                // parseDeliveries; the engine's leniency masked it).
+                encoding: None,
             },
             commitment_text,
         ));

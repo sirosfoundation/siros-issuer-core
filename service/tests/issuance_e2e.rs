@@ -3004,6 +3004,23 @@ async fn nym_auth_rulebook_issuance_resolves_salt_and_commitments_from_config() 
         json!(["eu.europa.ec.eudi.nym_auth.1", "ssc"])
     );
     assert_eq!(entries[0]["alg"], "sha-256");
+    // Issue #39: the delivered entry carries EXACTLY the rulebook §4.1
+    // type vocabulary — {type, alg, path, opening}; the configured
+    // `encoding` is the issuer config's member (and the metadata
+    // advertisement's), never the response entry's. The regression:
+    // the encoding member's return broke every strict wallet
+    // ("the delivered metadata is malformed").
+    assert_eq!(
+        serde_json::to_value(&entries[0])
+            .unwrap()
+            .as_object()
+            .expect("the entry object")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec!["alg", "opening", "path", "type"],
+        "the delivered entry's members are exactly the §4.1 vocabulary"
+    );
     let opening_b64 = entries[0]["opening"].as_str().expect("the opening");
     let opening =
         siros_issuer_core::sdjwt_issue::b64u_decode(opening_b64).expect("opening is base64url");
