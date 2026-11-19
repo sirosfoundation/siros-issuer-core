@@ -316,22 +316,29 @@ export class IssuanceFlow {
   }
 
   renderLaunch(handle) {
-    const actions = document.createElement("div");
-    actions.className = "flow-actions";
     const offerUri = handle.offer_uri ?? null;
-    const labels = { qr: "Scan QR code", "dc-api": "Issue to this device", "deep-link": "Open in wallet" };
-    for (const mechanism of this.invocations) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.textContent = labels[mechanism];
-      button.addEventListener("click", () => this.launch(mechanism).catch((error) => {
-        this.setStatus(error.message || String(error));
-      }));
-      actions.append(button);
-    }
     const section = document.createElement("div");
     section.className = "wallet-launch";
-    section.append(actions);
+    // Buttons for the mechanisms that ACT (dc-api issues to this device,
+    // deep-link navigates) — never for "qr": the code is its own
+    // affordance, and a "Scan QR code" button over the code itself is a
+    // demo artifact, not a launch surface.
+    const labels = { "dc-api": "Issue to this device", "deep-link": "Open in wallet" };
+    const acting = this.invocations.filter((mechanism) => mechanism !== "qr");
+    if (acting.length) {
+      const actions = document.createElement("div");
+      actions.className = "flow-actions";
+      for (const mechanism of acting) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = labels[mechanism];
+        button.addEventListener("click", () => this.launch(mechanism).catch((error) => {
+          this.setStatus(error.message || String(error));
+        }));
+        actions.append(button);
+      }
+      section.append(actions);
+    }
     // The QR renders the offer URI — the same one a wallet would scan.
     if (this.invocations.includes("qr") && offerUri) {
       const qr = document.createElement("div");

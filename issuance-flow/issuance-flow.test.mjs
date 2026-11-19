@@ -777,3 +777,39 @@ test("the countdown is scoped to the offer window — engagement and landing dro
     }
   }
 });
+
+test("the qr invocation renders the code itself — no launch button (the code IS the affordance)", async () => {
+  const root = element();
+  const flow = new IssuanceFlow({
+    root,
+    getSession: async () => ({
+      session_id: "s1", state: "offered", offer_uri: "https://i.example/o/1",
+      qr_svg: "<svg></svg>",
+    }),
+    invocations: ["qr"],
+  });
+  await flow.render("s1");
+  const launch = rowOf(root, "wallet-launch");
+  assert.ok(launch, "the launch section renders");
+  assert.ok(launch.children.some((kid) => kid.className === "qr-code"), "the QR is the launch surface");
+  assert.ok(!launch.children.some((kid) => kid.className === "flow-actions"), "no actions row for a qr-only flow");
+  const texts = JSON.stringify(launch.children.map((k) => k.textContent ?? ""));
+  assert.ok(!texts.includes("Scan QR code"), "no scan button over the code");
+});
+
+test("acting mechanisms still get their buttons beside the qr", async () => {
+  const root = element();
+  const flow = new IssuanceFlow({
+    root,
+    getSession: async () => ({
+      session_id: "s1", state: "offered", offer_uri: "https://i.example/o/1",
+      qr_svg: "<svg></svg>",
+    }),
+    invocations: ["qr", "deep-link"],
+  });
+  await flow.render("s1");
+  const launch = rowOf(root, "wallet-launch");
+  const actions = launch.children.find((kid) => kid.className === "flow-actions");
+  assert.ok(actions, "the actions row renders for the acting mechanism");
+  assert.deepEqual(actions.children.map((b) => b.textContent), ["Open in wallet"]);
+});
