@@ -346,10 +346,19 @@ pub async fn nonce(
                 .await;
         }
     }
-    *state
-        .last_public_nonce
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = nonce_value.clone();
+    {
+        // The ring: every minted nonce lives until the ring is full —
+        // concurrent pre-session proofs each bind their own (the
+        // step-back review's #3: the single-slot interleave).
+        let mut ring = state
+            .public_nonces
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        ring.push_back((nonce_value.clone(), now));
+        while ring.len() > state.public_nonce_slots {
+            ring.pop_front();
+        }
+    }
     // RFC 6749 §5.1 / suite CheckCacheControlHeaderContainsNoStore.
     let cache_control = (
         axum::http::HeaderName::from_static("cache-control"),
@@ -501,6 +510,7 @@ pub async fn token(
             let verified = state
                 .dpop
                 .validate(proof, "POST", &htu, now, None)
+                .await
                 .map_err(oauth_err)?;
             Some(verified.jkt)
         }
@@ -784,7 +794,7 @@ async fn credential_inner(
         .session_by_access_token(&token_hash, now)
         .await
         .ok_or_else(|| err(Error::invalid_input("unknown or expired access token")))?;
-    enforce_sender_constrained_token(&state, &headers, &dpop_jkt, "credential", now)?;
+    enforce_sender_constrained_token(&state, &headers, &dpop_jkt, "credential", now).await?;
     let record = state.sessions.get(&session_id).await.ok_or_else(|| {
         credential_err(
             &state,
@@ -881,10 +891,12 @@ async fn credential_inner(
     // nonce endpoint (which the suite fetches before its first credential
     // request). Either binds freshness; both are single-use in time.
     let public_nonce = state
-        .last_public_nonce
+        .public_nonces
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone();
+        .back()
+        .map(|(nonce, _)| nonce.clone())
+        .unwrap_or_default();
     let session_nonce = record.c_nonce.clone();
 
     // Extract every holder key the proofs carry, verifying each proof
@@ -892,9 +904,29 @@ async fn credential_inner(
     let mut holder_jwks: Vec<jose_rs::jwk::Jwk> = Vec::new();
     for (proof_type, jwt) in &proofs {
         let keys = match proof_type.as_str() {
-            "jwt" => verify_jwt_proof(jwt, &state.issuer_base, &session_nonce, now, 60)
-                .or_else(|_| verify_jwt_proof(jwt, &state.issuer_base, &public_nonce, now, 60))
-                .map(|jwk| vec![jwk]),
+            "jwt" => {
+                // Final §7.1/§7.2.2: the proof binds the session's
+                // rotated nonce OR any LIVE public nonce (the ring — a
+                // concurrent wallet's mint does not kill another's).
+                let mut verified =
+                    verify_jwt_proof(jwt, &state.issuer_base, &session_nonce, now, 60);
+                if verified.is_err() {
+                    let ring = state
+                        .public_nonces
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    for (nonce, minted_at) in ring.iter() {
+                        if now.saturating_sub(*minted_at) > state.c_nonce_ttl_seconds {
+                            continue; // stale slot (the ring's soft expiry)
+                        }
+                        verified = verify_jwt_proof(jwt, &state.issuer_base, nonce, now, 60);
+                        if verified.is_ok() {
+                            break;
+                        }
+                    }
+                }
+                verified.map(|jwk| vec![jwk])
+            }
             // Appendix D.1: ALL attested_keys — one credential per key in
             // a batch (vc `ExtractAllJWKs`); the signature is checked
             // against the x5c leaf (self-consistency — trust in the
@@ -1230,7 +1262,7 @@ fn hex_of(value: &str) -> String {
 /// binding minted at /token. Enforced identically at `/credential`
 /// and `/deferred-credential` (Final §9 — the same access token).
 #[allow(clippy::result_large_err)]
-fn enforce_sender_constrained_token(
+async fn enforce_sender_constrained_token(
     state: &AppState,
     headers: &HeaderMap,
     bound_jkt: &Option<String>,
@@ -1257,6 +1289,7 @@ fn enforce_sender_constrained_token(
     let verified = state
         .dpop
         .validate(proof, "POST", &htu, now, Some(&ath))
+        .await
         .map_err(err)?;
     if &verified.jkt != bound_jkt {
         return Err(err(Error::invalid_input(
@@ -1332,7 +1365,8 @@ pub async fn deferred_credential(
         .session_by_access_token(&token_hash, now)
         .await
         .ok_or_else(|| err(Error::invalid_input("unknown or expired access token")))?;
-    enforce_sender_constrained_token(&state, &headers, &dpop_jkt, "deferred-credential", now)?;
+    enforce_sender_constrained_token(&state, &headers, &dpop_jkt, "deferred-credential", now)
+        .await?;
 
     // The single-use arm: atomic consume, session-bound (a mismatched
     // principal's poll never claims). None = unknown, already claimed,

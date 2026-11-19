@@ -402,7 +402,8 @@ async fn spawn_service_dyn_posture(
         refresh: Arc::new(RefreshStatus::default()),
         sessions: Arc::new(MemoryStore::new()),
         dpop: Arc::new(siros_issuer_service::dpop::DpopValidator::new(60)),
-        last_public_nonce: Arc::new(std::sync::Mutex::new(String::new())),
+        public_nonces: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+        public_nonce_slots: 8,
         login_url: Some(Url::parse("http://127.0.0.1:8080/dev-portal/login").unwrap()),
         clients: Arc::new(suite_client_registry()),
         pre_authorized_client_auth,
@@ -5562,4 +5563,109 @@ async fn a_revoked_session_issues_nothing() {
     let body: Value = refused.json().await.unwrap();
     assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "{body}");
     assert!(body.to_string().contains("revoked"), "{body}");
+}
+
+// ─── Step-back #2/#3: multi-replica correctness ─────────────────────────
+
+/// The public-nonce ring (step-back #3): two wallets mint back-to-back
+/// — the FIRST one's nonce still proves. The single-slot nonce let B's
+/// mint kill A's; the ring keeps a window's worth live.
+#[tokio::test]
+async fn concurrent_public_nonces_coexist() {
+    let allocator = Arc::new(RecordingAllocator {
+        list_url: Url::parse("http://127.0.0.1:9/lists/test-list").unwrap(),
+        next_index: AtomicU64::new(7),
+        updates: Mutex::new(Vec::new()),
+    });
+    let service = spawn_service(Arc::new(PermitPdp), allocator, test_signer()).await;
+    let client = reqwest::Client::new();
+
+    let code = mint_pre_auth_code(&service).await;
+    let token = redeem_plain(&service, code).await;
+
+    // Wallet A mints; wallet B mints immediately after.
+    let nonce_a: Value = client
+        .post(format!("{}/nonce", service.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let nonce_b: Value = client
+        .post(format!("{}/nonce", service.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_ne!(
+        nonce_a["c_nonce"], nonce_b["c_nonce"],
+        "two mints give two nonces"
+    );
+
+    // A's proof still binds with A's (superseded) nonce — the ring.
+    let holder = ec_key();
+    let proof = proof_jwt(
+        &holder,
+        &Url::parse(ISSUER_BASE).unwrap(),
+        nonce_a["c_nonce"].as_str().unwrap(),
+    );
+    let credential: Value = client
+        .post(format!("{}/credential", service.base))
+        .bearer_auth(token["access_token"].as_str().unwrap())
+        .json(&json!({
+            "credential_configuration_id": "urn:eudi:pid:1",
+            "proof": { "proof_type": "jwt", "jwt": proof },
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        credential["credentials"][0]["credential"].is_string(),
+        "A's nonce survives B's mint (the ring): {credential}"
+    );
+}
+
+/// The replay backend is injectable (step-back #2): a shared backend
+/// across validators sees one proof consumed by EITHER — the
+/// multi-replica shape (each replica its DpopValidator, ONE backend).
+#[tokio::test]
+async fn the_replay_backend_shares_across_validators() {
+    use siros_issuer_service::dpop::{DpopValidator, MemoryReplayStore};
+    let shared: std::sync::Arc<MemoryReplayStore> = std::sync::Arc::new(MemoryReplayStore::new());
+    let replica_a = DpopValidator::with_backend(60, shared.clone());
+    let replica_b = DpopValidator::with_backend(60, shared.clone());
+
+    // One DPoP proof, consumed at replica A — replayed at replica B it
+    // refuses (the in-process cache of old let it pass).
+    let key = ec_key();
+    let htu = Url::parse("https://i.example.org/token").unwrap();
+    let mut claims = json!({"htm": "POST", "htu": htu.as_str(), "iat": now_unix()});
+    let mut buf = [0u8; 16];
+    getrandom::fill(&mut buf).expect("OS randomness");
+    claims["jti"] = json!(siros_issuer_core::sdjwt_issue::b64u(&buf));
+    let proof = sign_jwt(&key, "dpop+jwt", &claims, true);
+
+    let now = now_unix();
+    let first = replica_a.validate(&proof, "POST", &htu, now, None).await;
+    let first_err = first.err();
+    assert!(
+        first_err.is_none(),
+        "the first consumption (replica A): {:?}",
+        first_err.map(|e| e.message)
+    );
+    let replay = replica_b
+        .validate(&proof, "POST", &htu, now, None)
+        .await
+        .err()
+        .expect("the replay refuses");
+    assert!(
+        replay.message.contains("replayed"),
+        "the SHARED backend catches the cross-replica replay: {replay}"
+    );
 }

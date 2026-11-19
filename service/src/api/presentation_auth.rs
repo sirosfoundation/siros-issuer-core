@@ -147,6 +147,7 @@ pub async fn authorization_challenge(
     let verified = state
         .dpop
         .validate(dpop_proof, "POST", &htu, now, None)
+        .await
         .map_err(err)?;
 
     // The DCQL query: the session's credential configuration — or, for a

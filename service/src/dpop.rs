@@ -17,11 +17,57 @@ use siros_issuer_core::{Error, Result};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+/// Where replay state lives (the step-back review's #2: the in-process
+/// cache let a captured proof replay against ANOTHER replica succeed).
+/// One process ⇒ the memory cache (v1's shape, the suite's);
+/// multi-replica deployments wire a shared backend behind the same
+/// trait — the check-and-remember is ATOMIC ON THE BACKEND, or two
+/// replicas would both "win" the same jti.
+#[async_trait::async_trait]
+pub trait DpopReplayStore: Send + Sync {
+    /// Check-and-remember (atomic): false when `(jkt, jti)` was already
+    /// seen inside the window; true (and remembered) when fresh.
+    async fn claim(&self, jkt: &str, jti: &str, iat: i64, window_secs: i64) -> Result<bool>;
+}
+
+/// The in-process backend (v1's shape): lazy pruning, per (jkt, jti).
+pub struct MemoryReplayStore {
+    seen: Mutex<HashMap<(String, String), i64>>,
+}
+
+impl MemoryReplayStore {
+    pub fn new() -> Self {
+        Self {
+            seen: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl Default for MemoryReplayStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait::async_trait]
+impl DpopReplayStore for MemoryReplayStore {
+    async fn claim(&self, jkt: &str, jti: &str, iat: i64, window_secs: i64) -> Result<bool> {
+        let mut seen = self
+            .seen
+            .lock()
+            .map_err(|_| Error::new(code::TRANSPORT, "DPoP replay cache lock poisoned"))?;
+        // Prune entries older than the window on both sides.
+        let now = iat;
+        seen.retain(|_, seen_iat| now.saturating_sub(*seen_iat) <= 2 * window_secs);
+        Ok(seen.insert((jkt.to_owned(), jti.to_owned()), iat).is_none())
+    }
+}
+
 pub struct DpopValidator {
     /// Proof freshness window (RFC 9449 §4.1: +/- from iat).
     window_secs: i64,
-    /// (jkt, jti) -> iat; pruned lazily by the window.
-    seen: Mutex<HashMap<(String, String), i64>>,
+    /// The replay backend: per-process by default, shared for replicas.
+    replay: std::sync::Arc<dyn DpopReplayStore>,
 }
 
 /// A validated DPoP proof.
@@ -33,9 +79,16 @@ pub struct DpopVerified {
 
 impl DpopValidator {
     pub fn new(window_secs: i64) -> Self {
+        Self::with_backend(window_secs, std::sync::Arc::new(MemoryReplayStore::new()))
+    }
+
+    /// Multi-replica deployments: the shared backend (the step-back
+    /// review's #2 — vc's cacheService class). The backend's claim is
+    /// the atomicity point.
+    pub fn with_backend(window_secs: i64, replay: std::sync::Arc<dyn DpopReplayStore>) -> Self {
         Self {
             window_secs,
-            seen: Mutex::new(HashMap::new()),
+            replay,
         }
     }
 
@@ -43,7 +96,7 @@ impl DpopValidator {
     /// access-token hash at resource endpoints (RFC 9449 §4.1/§4.3);
     /// `None` at the token endpoint, where the proof binds the *new*
     /// token instead.
-    pub fn validate(
+    pub async fn validate(
         &self,
         proof: &str,
         htm: &str,
@@ -128,20 +181,15 @@ impl DpopValidator {
         // Replay: (jkt, jti) must be unseen and unexpired.
         let jkt = jose_rs::jwk::thumbprint::thumbprint_sha256(&jwk)
             .map_err(|e| Error::new(code::INVALID_INPUT, format!("thumbprint: {e}")))?;
+        // Replay: (jkt, jti) must be unseen — atomically ON THE BACKEND
+        // (a captured proof replayed against another replica is the
+        // multi-replica case; the backend's claim is the single gate).
+        if !self
+            .replay
+            .claim(&jkt, &claims.jti, claims.iat, self.window_secs)
+            .await?
         {
-            let mut seen = self
-                .seen
-                .lock()
-                .map_err(|_| Error::new(code::TRANSPORT, "DPoP replay cache lock poisoned"))?;
-            // Prune entries older than the window on both sides.
-            let window = self.window_secs;
-            seen.retain(|_, iat| now.saturating_sub(*iat) <= 2 * window);
-            if seen
-                .insert((jkt.clone(), claims.jti.clone()), claims.iat)
-                .is_some()
-            {
-                return Err(Error::new(code::INVALID_INPUT, "DPoP jti replayed"));
-            }
+            return Err(Error::new(code::INVALID_INPUT, "DPoP jti replayed"));
         }
         Ok(DpopVerified { jwk, jkt, claims })
     }

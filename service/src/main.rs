@@ -358,7 +358,8 @@ async fn run(config_path: &str) -> siros_issuer_core::Result<()> {
         refresh: Arc::new(RefreshStatus::default()),
         sessions: sessions_dyn,
         dpop: Arc::new(siros_issuer_service::dpop::DpopValidator::new(60)),
-        last_public_nonce: Arc::new(std::sync::Mutex::new(String::new())),
+        public_nonces: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+        public_nonce_slots: 8,
         login_url: config
             .authorization
             .login_url

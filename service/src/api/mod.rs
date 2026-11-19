@@ -127,9 +127,16 @@ pub struct AppState {
     pub sessions: Arc<dyn crate::store::SessionStore>,
     /// DPoP proof validation (RFC 9449): replay cache + freshness window.
     pub dpop: Arc<crate::dpop::DpopValidator>,
-    /// The most recent c_nonce minted at the public nonce endpoint (Final
-    /// §7.1), where proofs bind before any session linkage exists.
-    pub last_public_nonce: Arc<std::sync::Mutex<String>>,
+    /// The live public nonces (Final §7.1), where proofs bind before
+    /// any session linkage exists. A bounded RING (the step-back
+    /// review's #3: the single-slot nonce let concurrent sessions
+    /// interleave — A's nonce died when B minted); every nonce minted
+    /// inside the window is acceptable to a proof, the oldest falls
+    /// out naturally.
+    pub public_nonces: Arc<std::sync::Mutex<std::collections::VecDeque<(String, i64)>>>,
+    /// How many public nonces live at once (the ring bound — a window's
+    /// worth of concurrent pre-session proofs).
+    pub public_nonce_slots: usize,
     /// Mode A login handoff target (design §7.2): the integrator's page.
     pub login_url: Option<url::Url>,
     /// Pre-registered clients for the AS surface (design §12.2-resolved).
