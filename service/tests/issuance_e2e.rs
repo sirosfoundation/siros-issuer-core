@@ -4219,6 +4219,46 @@ async fn mint_pre_auth_code(service: &TestService) -> String {
         .to_owned()
 }
 
+/// Fetch an offer by URI and pull its pre-authorized code (the
+/// five-test pattern, ONE copy).
+async fn offer_code(service: &TestService, offer_uri: &str) -> String {
+    let offer: Value = reqwest::Client::new()
+        .get(format!(
+            "{}{}",
+            service.base,
+            offer_uri.trim_start_matches(ISSUER_BASE)
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    offer["grants"][GRANT_PRE_AUTHORIZED_CODE]["pre-authorized_code"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// Redeem a pre-auth code to a plain token response (the revocation
+/// test's base — the same flow mint_pre_auth_code + a token POST
+/// walks in four other tests; ONE copy).
+async fn redeem_plain(service: &TestService, code: String) -> Value {
+    let client = reqwest::Client::new();
+    client
+        .post(format!("{}/token", service.base))
+        .form(&token_form(&[
+            ("grant_type", GRANT_PRE_AUTHORIZED_CODE.to_owned()),
+            ("pre_authorized_code", code),
+        ]))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
 /// The REQUIRED posture (the default, the conformance profile): a token
 /// request with NO client auth refuses — and with the RFC 6749 §5.2
 /// code `invalid_client`, never the misdirecting `invalid_grant` the
@@ -5456,34 +5496,8 @@ async fn a_revoked_session_issues_nothing() {
     let session_id = created_body["session_id"].as_str().unwrap().to_owned();
     let offer_uri = created_body["offer_uri"].as_str().unwrap().to_owned();
 
-    let offer: Value = client
-        .get(format!(
-            "{}{}",
-            service.base,
-            offer_uri.trim_start_matches(ISSUER_BASE)
-        ))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let code = offer["grants"][GRANT_PRE_AUTHORIZED_CODE]["pre-authorized_code"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let token: Value = client
-        .post(format!("{}/token", service.base))
-        .form(&token_form(&[
-            ("grant_type", GRANT_PRE_AUTHORIZED_CODE.to_owned()),
-            ("pre_authorized_code", code),
-        ]))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let code = offer_code(&service, &offer_uri).await;
+    let token = redeem_plain(&service, code).await;
     assert!(token["access_token"].is_string(), "{token}");
 
     // Issue ONCE (the revoke endpoint requires the allocated status
