@@ -5906,3 +5906,54 @@ async fn as_metadata_advertises_the_accepted_client_auth_methods() {
         "{md}"
     );
 }
+
+// ─── Issue #9: a server-side config fault names its class ────────────────
+
+/// The issue's reproduction, corrected: a WIA-authenticated token request
+/// against an issuer WITHOUT [authorization.attestation.wallet] is a
+/// SERVER configuration fault — RFC 6749 §5.2 `temporarily_unavailable`
+/// with a 503, never a 400 `invalid_request` (the code a client sees
+/// names the class: "retry later / the operator's problem", not "your
+/// request is malformed" — the misdirected live debugging the issue
+/// recorded).
+#[tokio::test]
+async fn an_unconfigured_attestation_arm_is_temporarily_unavailable() {
+    let allocator = Arc::new(RecordingAllocator {
+        list_url: Url::parse("http://127.0.0.1:9/lists/test-list").unwrap(),
+        next_index: AtomicU64::new(41),
+        updates: Mutex::new(Vec::new()),
+    });
+    // spawn_service carries no [authorization.attestation.wallet] —
+    // the arm is unconfigured, the issue's exact shape.
+    let service = spawn_service(Arc::new(PermitPdp), allocator, test_signer()).await;
+    let client = reqwest::Client::new();
+
+    let response = client
+        .post(format!("{}/token", service.base))
+        .header("OAuth-Client-Attestation", "a.wia.jwt")
+        .header("OAuth-Client-Attestation-PoP", "a.pop.jwt")
+        .form(&token_form(&[
+            ("grant_type", GRANT_PRE_AUTHORIZED_CODE.to_owned()),
+            ("pre_authorized_code", "pac_absent".to_owned()),
+        ]))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(
+        status,
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        "a configuration fault is a 503: {body}"
+    );
+    assert_eq!(
+        body["error"], "temporarily_unavailable",
+        "the code names the server-side class (issue #9): {body}"
+    );
+    assert!(
+        body["error_description"]
+            .as_str()
+            .is_some_and(|d| d.contains("not configured")),
+        "{body}"
+    );
+}

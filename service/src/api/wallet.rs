@@ -94,7 +94,14 @@ fn client_auth_failure(error: Error) -> Error {
 }
 
 fn oauth_err(error: Error) -> Response {
-    let status = StatusCode::BAD_REQUEST;
+    // Issue #9: the status follows the error's class — a server-side
+    // configuration fault is a 503 with `temporarily_unavailable` (RFC
+    // 6749 §5.2), a client-shaped fault a 400. The previous unconditional
+    // 400 surfaced config failures as client errors.
+    let status = match error.code {
+        siros_issuer_core::error::code::CONFIGURATION => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::BAD_REQUEST,
+    };
     (
         status,
         Json(json!({
@@ -116,6 +123,15 @@ fn oauth_error_code(error: &Error) -> &'static str {
         // RFC 6749 §5.2: unknown grants, and the refresh_token grant
         // when the deployment gate is off (gap 1).
         siros_issuer_core::error::code::UNSUPPORTED_GRANT_TYPE => "unsupported_grant_type",
+        // RFC 6749 §5.2 (issue #9): a server-side configuration fault is
+        // `temporarily_unavailable` — the code a client sees should name
+        // the class of failure, because that is all a client sees. A
+        // misconfigured issuer answered `invalid_request`, sending the
+        // live debugging into the request's shape ("my request is
+        // malformed") while the failure was the server's config (the
+        // wallet-attestation arm firing on an issuer without
+        // [authorization.attestation.wallet] configured).
+        siros_issuer_core::error::code::CONFIGURATION => "temporarily_unavailable",
         _ => "invalid_request",
     }
 }
