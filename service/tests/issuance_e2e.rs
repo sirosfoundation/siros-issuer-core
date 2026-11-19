@@ -409,6 +409,7 @@ async fn spawn_service_dyn_posture(
         pre_authorized_client_auth,
         refresh_token,
         response_encryption_required: config.issuer.response_encryption_required,
+        disclosure_policies: config.issuer.disclosure_policies.clone(),
         scopes: std::collections::HashMap::new(),
         endpoint_paths: siros_issuer_core::oid4vci::EndpointPaths {
             batch_credential: Some(("batch-credential", 4)),

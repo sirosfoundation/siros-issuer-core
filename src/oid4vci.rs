@@ -108,6 +108,31 @@ pub struct AuxiliaryDataWireEntry {
     pub encoding: Option<String>,
 }
 
+/// The ARF's embedded disclosure policy (CIR 2024/2979 Annex III / ETSI TS
+/// 119 472-3 §4.2.5; vc `pkg/openid4vci.EmbeddedDisclosurePolicy`): the
+/// conditions a wallet-relying party must meet to access this
+/// attestation. **No stable normative key layout exists yet**
+/// (openid/OpenID4VCI#384) — this is the vc/ARF shape, per-credential,
+/// OPTIONAL and absent by default (the conformance schema's closed
+/// set is only exercised when a deployment configures one).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DisclosurePolicy {
+    /// One of `none` (default), `authorized_relying_parties`, or
+    /// `specific_root_of_trust`.
+    pub policy_type: String,
+    /// `authorized_relying_parties`: the EU-wide unique RP identifiers
+    /// (the Wallet-Relying Party Registration Certificate) that may
+    /// receive this attestation. Required with that policy type.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authorized_relying_parties: Vec<String>,
+    /// `specific_root_of_trust`: SHA-256 fingerprints (hex, 64
+    /// characters) of the root/intermediate certificates an RP's
+    /// access certificate must derive from. Required with that
+    /// policy type.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_roots: Vec<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct CredentialConfiguration {
@@ -139,6 +164,12 @@ pub struct CredentialConfiguration {
     /// profile's metadata is unchanged).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auxiliary_data_supported: Option<AuxiliaryDataSupported>,
+    /// The ARF/CIR disclosure policy (gap 3): absent by default (the
+    /// conformance schema's closed set); a deployment configuring one
+    /// accepts the vc/ARF extension shape (openid/OpenID4VCI#384 — no
+    /// stable normative layout yet).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disclosure_policy: Option<DisclosurePolicy>,
 }
 
 /// Final §12.2.4 proof type entry: proof_signing_alg_values_supported is
@@ -255,6 +286,7 @@ pub fn metadata_from_catalog(
     paths: &EndpointPaths,
     auxiliary_data_plans: &BTreeMap<String, AuxiliaryDataSupported>,
     encryption_required: bool,
+    disclosure_policies: &BTreeMap<String, DisclosurePolicy>,
 ) -> Result<CredentialIssuerMetadata> {
     let credential_request_encryption = paths.request_encryption_jwk.as_ref().map(|jwk| {
         // Publish the PUBLIC members only: `d` never leaves the
@@ -306,8 +338,16 @@ pub fn metadata_from_catalog(
             }
         }
         let configuration = match credential.format.as_str() {
-            SD_JWT_FORMAT => sd_jwt_configuration(credential, auxiliary_data),
-            MDOC_FORMAT => mdoc_configuration(credential, auxiliary_data),
+            SD_JWT_FORMAT => sd_jwt_configuration(
+                credential,
+                auxiliary_data,
+                disclosure_policies.get(&id).cloned(),
+            ),
+            MDOC_FORMAT => mdoc_configuration(
+                credential,
+                auxiliary_data,
+                disclosure_policies.get(&id).cloned(),
+            ),
             // Unreachable: the match above filtered to these two.
             _ => unreachable!("the format was just filtered"),
         };
@@ -359,9 +399,11 @@ pub fn metadata_from_catalog(
 fn sd_jwt_configuration(
     credential: &CredentialType,
     auxiliary_data: Option<&AuxiliaryDataSupported>,
+    disclosure_policy: Option<DisclosurePolicy>,
 ) -> CredentialConfiguration {
     CredentialConfiguration {
         format: SD_JWT_FORMAT,
+        disclosure_policy,
         vct: Some(credential.identifier.clone()),
         doctype: None,
         claims: Some(
@@ -394,9 +436,11 @@ fn sd_jwt_configuration(
 fn mdoc_configuration(
     credential: &CredentialType,
     auxiliary_data: Option<&AuxiliaryDataSupported>,
+    disclosure_policy: Option<DisclosurePolicy>,
 ) -> CredentialConfiguration {
     CredentialConfiguration {
         format: MDOC_FORMAT,
+        disclosure_policy,
         vct: None,
         doctype: Some(credential.identifier.clone()),
         // No `claims` member for mso_mdoc: the conformance suite's

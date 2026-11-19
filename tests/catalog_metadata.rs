@@ -6,7 +6,8 @@
 use serde_json::json;
 use siros_issuer_core::catalog::{build_catalog, resolve};
 use siros_issuer_core::oid4vci::{
-    authorization_server_metadata, metadata_from_catalog, EndpointPaths, MDOC_FORMAT, SD_JWT_FORMAT,
+    authorization_server_metadata, metadata_from_catalog, DisclosurePolicy, EndpointPaths,
+    MDOC_FORMAT, SD_JWT_FORMAT,
 };
 use siros_verifier_core::ts11::{parse_schema_page, RegistryDocument, SchemaMeta};
 use url::Url;
@@ -60,6 +61,9 @@ fn catalog_drives_metadata_and_configuration_ids() {
         &std::collections::BTreeMap::new(),
         // The default posture (issue #21): required.
         true,
+        // The ARF disclosure policies (gap 3): empty — absent everywhere
+        // (the conformance shape).
+        &std::collections::BTreeMap::new(),
     )
     .unwrap();
 
@@ -134,6 +138,9 @@ fn proof_types_follow_the_format() {
         &std::collections::BTreeMap::new(),
         // The default posture (issue #21): required.
         true,
+        // The ARF disclosure policies (gap 3): empty — absent everywhere
+        // (the conformance shape).
+        &std::collections::BTreeMap::new(),
     )
     .unwrap();
 
@@ -242,6 +249,9 @@ fn session_api_identifiers_match_configuration_ids() {
         &std::collections::BTreeMap::new(),
         // The default posture (issue #21): required.
         true,
+        // The ARF disclosure policies (gap 3): empty — absent everywhere
+        // (the conformance shape).
+        &std::collections::BTreeMap::new(),
     )
     .unwrap();
     for configuration_id in metadata.credential_configurations_supported.keys() {
@@ -273,6 +283,9 @@ fn credential_request_encryption_carries_only_final_schema_members() {
         &std::collections::BTreeMap::new(),
         // The default posture (issue #21): required.
         true,
+        // The ARF disclosure policies (gap 3): empty — absent everywhere
+        // (the conformance shape).
+        &std::collections::BTreeMap::new(),
     )
     .unwrap();
     let cre = metadata.credential_request_encryption.expect("declared");
@@ -289,4 +302,70 @@ fn credential_request_encryption_carries_only_final_schema_members() {
     );
     // RFC 7517: the private member never leaves the server.
     assert!(object["jwks"]["keys"][0].get("d").is_none());
+}
+
+/// Gap 3: a configured ARF disclosure policy (the vc/ARF shape — CIR
+/// 2024/2979 Annex III / ETSI TS 119 472-3 §4.2.5, openid/OpenID4VCI#384:
+/// no stable normative layout yet) embeds on THAT credential's
+/// configuration — and only that one; the others stay absent (the
+/// conformance closed set is exercised only by deployment config).
+#[test]
+fn a_configured_disclosure_policy_rides_its_own_configuration() {
+    let (_, documents) = fixtures();
+    let catalog = build_catalog(documents).unwrap();
+    let mut policies = std::collections::BTreeMap::new();
+    policies.insert(
+        "urn:eudi:pid:1".to_owned(),
+        DisclosurePolicy {
+            policy_type: "authorized_relying_parties".to_owned(),
+            authorized_relying_parties: vec!["RP-SE-000001".to_owned()],
+            trusted_roots: Vec::new(),
+        },
+    );
+    let metadata = metadata_from_catalog(
+        &issuer_base(),
+        &catalog,
+        vec![],
+        &EndpointPaths::default(),
+        &std::collections::BTreeMap::new(),
+        true,
+        &policies,
+    )
+    .unwrap();
+    let pid = metadata
+        .credential_configurations_supported
+        .get("urn:eudi:pid:1")
+        .expect("the pid configuration");
+    let policy = pid.disclosure_policy.as_ref().expect("the policy rides");
+    assert_eq!(policy.policy_type, "authorized_relying_parties");
+    assert_eq!(policy.authorized_relying_parties, vec!["RP-SE-000001"]);
+    assert!(policy.trusted_roots.is_empty());
+    // Every OTHER configuration stays absent — the conformance closed
+    // set is exercised only where configured.
+    for (id, configuration) in &metadata.credential_configurations_supported {
+        if id == "urn:eudi:pid:1" {
+            continue;
+        }
+        assert!(
+            configuration.disclosure_policy.is_none(),
+            "{id} carries no policy (unconfigured): {configuration:?}"
+        );
+    }
+    // And the EMPTY map (the default): absent everywhere.
+    let metadata = metadata_from_catalog(
+        &issuer_base(),
+        &catalog,
+        vec![],
+        &EndpointPaths::default(),
+        &std::collections::BTreeMap::new(),
+        true,
+        &std::collections::BTreeMap::new(),
+    )
+    .unwrap();
+    for (id, configuration) in &metadata.credential_configurations_supported {
+        assert!(
+            configuration.disclosure_policy.is_none(),
+            "{id} absent by default: {configuration:?}"
+        );
+    }
 }

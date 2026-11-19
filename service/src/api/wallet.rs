@@ -143,6 +143,9 @@ pub async fn credential_issuer_metadata(
         // The deployment's own posture (issue #21): the announced
         // truth, enforced at the endpoint.
         state.response_encryption_required,
+        // The ARF disclosure policies (gap 3): per-credential, absent
+        // by default (the conformance closed set).
+        &state.disclosure_policies,
     )
     .expect("a validated issuer base URL and catalog cannot fail generation");
 

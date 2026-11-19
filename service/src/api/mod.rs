@@ -187,6 +187,10 @@ pub struct AppState {
     /// false opts out. A to_wallet opening is refused in the clear
     /// EITHER way.
     pub response_encryption_required: bool,
+    /// The ARF disclosure policies (gap 3): per-credential, config-
+    /// gated, absent by default (the conformance closed set).
+    pub disclosure_policies:
+        std::collections::BTreeMap<String, siros_issuer_core::oid4vci::DisclosurePolicy>,
     /// ZK rulebooks (design §8.3 item 5): name → bundle. General data —
     /// issuance resolves the one bundle governing the session's
     /// credential (startup validation guarantees uniqueness).

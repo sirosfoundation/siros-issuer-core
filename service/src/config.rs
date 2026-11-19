@@ -418,6 +418,14 @@ pub struct IssuerCfg {
     /// never crosses the wire in the clear, whatever the knob says.
     #[serde(default = "default_true")]
     pub response_encryption_required: bool,
+    /// The ARF embedded disclosure policies (gap 3): per-credential
+    /// tables `[issuer.disclosure_policies.<credential_id>]`, the
+    /// vc/ARF shape (CIR 2024/2979 Annex III; ETSI TS 119 472-3 §4.2.5).
+    /// Absent by default — the conformance schema's closed set is only
+    /// exercised when a deployment configures one.
+    #[serde(default)]
+    pub disclosure_policies:
+        std::collections::BTreeMap<String, siros_issuer_core::oid4vci::DisclosurePolicy>,
     /// Local-test-only: allow plain-HTTP non-loopback URLs (the conformance
     /// compose network). The verifier-core conformance fixtures carry the
     /// same escape hatch (allow_invalid_status_list_certificates). Never
