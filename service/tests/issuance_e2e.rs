@@ -5428,3 +5428,124 @@ async fn wrong_alg_still_refuses_and_parse_failures_answer_400() {
         "a parse failure is a 400 (issue #24's 500): {body}"
     );
 }
+
+// ─── Step-back #1: revocation reaches the session machinery ─────────────
+
+/// A REVOKED session issues nothing new: the credential endpoint refuses
+/// a valid, unexpired access token bound to a revoked session (the
+/// status bit killed the old credentials; this guard stops the mint).
+#[tokio::test]
+async fn a_revoked_session_issues_nothing() {
+    let allocator = Arc::new(RecordingAllocator {
+        list_url: Url::parse("http://127.0.0.1:9/lists/test-list").unwrap(),
+        next_index: AtomicU64::new(7),
+        updates: Mutex::new(Vec::new()),
+    });
+    let service = spawn_service(Arc::new(PermitPdp), allocator, test_signer()).await;
+    let client = reqwest::Client::new();
+    let integrator = ec_key();
+
+    // A session we control the id of, its offer, its token.
+    let (created, _) = create_session(
+        &service,
+        &integrator,
+        json!({"credential": "urn:eudi:pid:1", "subject": {"given_name": "A", "family_name": "B"}}),
+    )
+    .await;
+    let created_body: Value = created.json().await.unwrap();
+    let session_id = created_body["session_id"].as_str().unwrap().to_owned();
+    let offer_uri = created_body["offer_uri"].as_str().unwrap().to_owned();
+
+    let offer: Value = client
+        .get(format!(
+            "{}{}",
+            service.base,
+            offer_uri.trim_start_matches(ISSUER_BASE)
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let code = offer["grants"][GRANT_PRE_AUTHORIZED_CODE]["pre-authorized_code"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let token: Value = client
+        .post(format!("{}/token", service.base))
+        .form(&token_form(&[
+            ("grant_type", GRANT_PRE_AUTHORIZED_CODE.to_owned()),
+            ("pre_authorized_code", code),
+        ]))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(token["access_token"].is_string(), "{token}");
+
+    // Issue ONCE (the revoke endpoint requires the allocated status
+    // index — revocation targets an ISSUED session).
+    let issue = |nonce: String, holder: &jose_rs::jwk::Jwk| {
+        let proof = proof_jwt(holder, &Url::parse(ISSUER_BASE).unwrap(), &nonce);
+        client
+            .post(format!("{}/credential", service.base))
+            .bearer_auth(token["access_token"].as_str().unwrap())
+            .json(&json!({
+                "credential_configuration_id": "urn:eudi:pid:1",
+                "proof": { "proof_type": "jwt", "jwt": proof },
+            }))
+            .send()
+    };
+    let fresh_nonce = async || {
+        let nonce: Value = client
+            .post(format!("{}/nonce", service.base))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        nonce["c_nonce"].as_str().unwrap().to_owned()
+    };
+    let first = issue(fresh_nonce().await, &ec_key()).await.unwrap();
+    assert!(
+        first.status().is_success(),
+        "the first issuance (revocation's precondition): {}",
+        first.status()
+    );
+
+    // Revoke the session (the integrator's POST /revoke — the status
+    // bit flips AND the record carries the flag).
+    let revocation = client
+        .post(format!(
+            "{}/api/v1/issuance/sessions/{session_id}/revoke",
+            service.base
+        ))
+        .header(
+            "Authorization",
+            format!(
+                "Bearer {}",
+                client_assertion(&integrator, &Url::parse(ISSUER_BASE).unwrap())
+            ),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        revocation.status().is_success(),
+        "the revoke: {}",
+        revocation.status()
+    );
+
+    // The VALID access token on the REVOKED session: the SECOND
+    // issuance refuses — the status bit killed the old credentials;
+    // this guard stops the mint.
+    let refused = issue(fresh_nonce().await, &ec_key()).await.unwrap();
+    let status = refused.status();
+    let body: Value = refused.json().await.unwrap();
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.to_string().contains("revoked"), "{body}");
+}

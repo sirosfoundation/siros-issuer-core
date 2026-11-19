@@ -588,6 +588,12 @@ pub async fn token(
             if record.refresh_token_expires_unix.unwrap_or_default() < now {
                 return Err(oauth_err(Error::invalid_input("refresh token has expired")));
             }
+            // Revocation reaches the session machinery (step-back #1):
+            // a revoked session rotates nothing — the guard precedes
+            // the CAS rotation (no consumption, just refusal).
+            if record.revoked {
+                return Err(oauth_err(Error::invalid_input("this session is revoked")));
+            }
             match &record.refresh_dpop_jkt {
                 Some(stored) if stored == &jkt => {}
                 None => {
@@ -788,6 +794,18 @@ async fn credential_inner(
             ),
         )
     })?;
+    // Revocation reaches the session machinery (step-back #1): a
+    // revoked session issued NOTHING new — the status bit kills the
+    // OLD credentials, this guard stops the session minting more.
+    if record.revoked {
+        return Err(credential_err(
+            &state,
+            &Error::new(
+                siros_issuer_core::error::code::ILLEGAL_TRANSITION,
+                "this session is revoked",
+            ),
+        ));
+    }
 
     // Final §8.2: the credential is selected by configuration id or by
     // identifiers of previously issued credentials. This issuer issues by

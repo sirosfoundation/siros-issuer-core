@@ -593,10 +593,7 @@ async fn the_handle_lookups_are_indexed() {
         eprintln!("skipping: no mongod at {DEFAULT_URI} — the host mongod");
         return;
     };
-    let names: Vec<String> = store
-        .index_names()
-        .await
-        .expect("the index listing");
+    let names: Vec<String> = store.index_names().await.expect("the index listing");
     for field in [
         "pre_authorized_code_hash",
         "auth_code_hash",
