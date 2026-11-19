@@ -581,3 +581,40 @@ async fn refresh_rotation_is_single_use_across_concurrent_rotations() {
         "the chained successor lives"
     );
 }
+
+/// The step-back review's scalability fix, asserted at the wire: the
+/// opaque-handle lookups are INDEXED (every claim/peek/update was a full
+/// collection scan before). The unique handles are SPARSE — the fields
+/// are per-grant, and a non-sparse unique index would reject the second
+/// session of the other grant (duplicate null).
+#[tokio::test]
+async fn the_handle_lookups_are_indexed() {
+    let Some((store, _coll)) = store("lookup_indexes").await else {
+        eprintln!("skipping: no mongod at {DEFAULT_URI} — the host mongod");
+        return;
+    };
+    let names: Vec<String> = store
+        .index_names()
+        .await
+        .expect("the index listing");
+    for field in [
+        "pre_authorized_code_hash",
+        "auth_code_hash",
+        "refresh_token_hash",
+        "challenge_handle",
+        "record.offer_uuid",
+        "record.notification_id",
+    ] {
+        assert!(
+            names.contains(&format!("{field}_lookup")),
+            "the {field} lookup index exists: {names:?}"
+        );
+    }
+    // The unique handles are sparse: two sessions of DIFFERENT grants
+    // (one pre-auth, one auth-code) coexist — the missing
+    // pre_authorized_code_hash on the second does not collide.
+    let pre = record(&session_id(41), St::Offered, NOW + 300);
+    store.insert(pre).await.unwrap();
+    let auth_code_session = record(&session_id(42), St::AwaitingAuthorization, NOW + 300);
+    store.insert(auth_code_session).await.unwrap();
+}

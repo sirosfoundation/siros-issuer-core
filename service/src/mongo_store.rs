@@ -136,11 +136,75 @@ impl MongoStore {
             .create_index(index)
             .await
             .map_err(|e| Error::configuration(format!("creating the retention index: {e}")))?;
+
+        // The opaque-handle lookup indexes (the step-back review: every
+        // claim/peek/update finds sessions by these fields, and an
+        // unindexed Mongo lookup is a FULL COLLECTION SCAN — the CAS
+        // find_one_and_update filters scan-and-lock. Unique where the
+        // handle is born once per slot (the pre-auth code, the auth
+        // code, the CURRENT refresh hash — rotation's CAS is the only
+        // mover); plain where the handle is assigned per-session
+        // (offer uuid, notification id, the mode-B challenge handle).
+        let lookup_index = |field: &str, unique: bool| {
+            IndexModel::builder()
+                .keys(doc! { field: 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name(format!("{field}_lookup"))
+                        .unique(unique)
+                        // SPARSE on the unique handles: the fields are
+                        // per-grant (an auth-code session carries no
+                        // pre_authorized_code_hash) and Mongo treats a
+                        // missing field as NULL — a unique index without
+                        // sparseness rejects the SECOND session of the
+                        // other grant. Sparse skips the missing ones;
+                        // present values stay unique.
+                        .sparse(unique)
+                        .build(),
+                )
+                .build()
+        };
+        for (field, unique) in [
+            ("pre_authorized_code_hash", true),
+            ("auth_code_hash", true),
+            ("refresh_token_hash", true),
+            ("challenge_handle", true),
+            ("record.offer_uuid", false),
+            ("record.notification_id", false),
+        ] {
+            store
+                .sessions
+                .create_index(lookup_index(field, unique))
+                .await
+                .map_err(|e| {
+                    Error::configuration(format!("creating the {field} lookup index: {e}"))
+                })?;
+        }
         Ok(store)
     }
 
-    /// Test support: re-create the retention index after a collection
-    /// drop (`connect` creates it once).
+    /// Test support: the collection's index names (the lookup-index
+    /// wire assertions).
+    #[cfg(feature = "mongo")]
+    pub async fn index_names(&self) -> Result<Vec<String>> {
+        use futures_util::StreamExt;
+        let mut cursor = self
+            .sessions
+            .list_indexes()
+            .await
+            .map_err(mongo_error)?;
+        let mut names = Vec::new();
+        while let Some(doc) = cursor.next().await {
+            let doc = doc.map_err(mongo_error)?;
+            if let Some(name) = doc.options.as_ref().and_then(|o| o.name.clone()) {
+                names.push(name);
+            }
+        }
+        Ok(names)
+    }
+
+    /// Test support: re-create the indexes after a collection drop
+    /// (`connect` creates them once).
     pub async fn create_test_index(&self) -> Result<()> {
         let index = IndexModel::builder()
             .keys(doc! { "retain_at": 1 })
@@ -155,6 +219,40 @@ impl MongoStore {
             .create_index(index)
             .await
             .map_err(|e| Error::configuration(format!("creating the retention index: {e}")))?;
+        let lookup_index = |field: &str, unique: bool| {
+            IndexModel::builder()
+                .keys(doc! { field: 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name(format!("{field}_lookup"))
+                        .unique(unique)
+                        // SPARSE on the unique handles: the fields are
+                        // per-grant (an auth-code session carries no
+                        // pre_authorized_code_hash) and Mongo treats a
+                        // missing field as NULL — a unique index without
+                        // sparseness rejects the SECOND session of the
+                        // other grant. Sparse skips the missing ones;
+                        // present values stay unique.
+                        .sparse(unique)
+                        .build(),
+                )
+                .build()
+        };
+        for (field, unique) in [
+            ("pre_authorized_code_hash", true),
+            ("auth_code_hash", true),
+            ("refresh_token_hash", true),
+            ("challenge_handle", true),
+            ("record.offer_uuid", false),
+            ("record.notification_id", false),
+        ] {
+            self.sessions
+                .create_index(lookup_index(field, unique))
+                .await
+                .map_err(|e| {
+                    Error::configuration(format!("creating the {field} lookup index: {e}"))
+                })?;
+        }
         Ok(())
     }
 
