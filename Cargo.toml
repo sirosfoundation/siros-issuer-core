@@ -21,7 +21,7 @@ publish = false
 [dependencies]
 # Verification, TS 119 602/TS11 schema parsing and status-list formats come
 # from the verifier core; issuance never re-implements them.
-siros-verifier-core = { git = "https://github.com/sirosfoundation/siros-verifier-core", rev = "dfe710e81320a0464a9c8267c326bb0809020be6" }
+siros-verifier-core = { git = "https://github.com/sirosfoundation/siros-verifier-core", rev = "0f128b8afb776033f1bb3eb9dcd8d0e0e26faef2" }
 # Same JOSE stack as the verifier (its testutil issuance primitives, ported
 # into src/sdjwt_issue.rs and src/response.rs, use these).
 jose-rs = { version = "0.10", default-features = false }

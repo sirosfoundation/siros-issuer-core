@@ -191,6 +191,10 @@ pub async fn authorization_challenge(
     };
     let (jar, oid4vp_session) = oid4vp::create_request(
         &RequestConfig {
+            // The EAAP registrar members: unconfigured (the pre-EAAP
+            // request shape; the OIDF conformance surface unaffected).
+            verifier_info: None,
+            wrprc: None,
             response_uri: response_uri.as_str().to_owned(),
             dcql_query,
             ttl_secs: 300,

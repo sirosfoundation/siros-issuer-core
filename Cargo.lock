@@ -3193,8 +3193,8 @@ dependencies = [
 
 [[package]]
 name = "siros-verifier-core"
-version = "0.1.0"
-source = "git+https://github.com/sirosfoundation/siros-verifier-core?rev=dfe710e81320a0464a9c8267c326bb0809020be6#dfe710e81320a0464a9c8267c326bb0809020be6"
+version = "0.1.7"
+source = "git+https://github.com/sirosfoundation/siros-verifier-core?rev=0f128b8afb776033f1bb3eb9dcd8d0e0e26faef2#0f128b8afb776033f1bb3eb9dcd8d0e0e26faef2"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
@@ -3389,7 +3389,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
