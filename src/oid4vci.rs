@@ -816,21 +816,23 @@ pub struct CredentialResponse {
     pub credential_metadata: Option<CredentialMetadata>,
 }
 
-/// Response-level credential metadata. The auxiliary-data extension's
-/// carrier — and, when the deployment opts in
-/// (`issuance.emit_credential_metadata_on_response`, issue #41), the
-/// display members the vc-issuer embeds on its responses: `display`
-/// (the localized display objects) and `claims` (the Appendix B.2
-/// claim descriptions), the shape the gdc web wallet's
-/// `DisplayOnlyCredentialMetadataSerializer` decodes — a wallet that
-/// renders a vc-issued credential's SVG card renders ours identically.
+/// Response-level credential metadata (OpenID4VCI 1.0 ID1 §12.2.4). The
+/// auxiliary-data extension's carrier — and, when the deployment opts
+/// in (`issuance.emit_credential_metadata_on_response`, issue #41),
+/// the display members: `display` (the localized display objects) and
+/// `claims` (the §12.2.4 Appendix B.2 claim descriptions), the shape
+/// the gdc web wallet's `DisplayOnlyCredentialMetadataSerializer`
+/// decodes — a wallet that renders a vc-issued credential's SVG card
+/// renders ours identically. vc `pkg/openid4vci/issuer_metadata.go` /
+/// `pkg/model/config.go`'s Generate mapping is the ported-semantics
+/// reference (design doc Appendix A); its `Delivery
+/// .EmitCredentialMetadataOnResponse` gate is mirrored below.
 ///
 /// The members are gated because the OIDF suite's response schema has a
 /// closed member set (`credential_metadata` on a non-rulebook
 /// credential is an unknown member): the default posture is OFF (the
 /// conformance fixture's), a wallet-serving deployment opts in (the
-/// realeyes fixture's) — vc's own `Delivery
-/// .EmitCredentialMetadataOnResponse` gate, same shape.
+/// realeyes fixture's).
 #[derive(Debug, Serialize)]
 pub struct CredentialMetadata {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
