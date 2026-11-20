@@ -2017,19 +2017,45 @@ async fn issue_mdoc_entries(
     // its path — [namespace, element] for an mdoc rulebook — and the
     // matching opening rides the response (the wallet derives the same
     // opening from its side and verifies the commitment).
-    for (entry, commitment) in &to_wallet_entries {
-        let [namespace, element] = entry.path.as_slice() else {
+    //
+    // Issue #43: the claim's CBOR encoding follows the CATALOG's
+    // declared value_type — the wire contract the wallets bind. `bstr`
+    // carries the raw commitment bytes (the presenter reads ssc as one
+    // 32-byte byte string); `tstr` the configured-encoding text; an
+    // undeclared or non-carrier type is a REFUSAL at issuance, never a
+    // guessed encoding (the leniency that delivered a text ssc past the
+    // encoding-aware issuance gate and refused at presentation, after
+    // consent).
+    for derived in &to_wallet_entries {
+        let [namespace, element] = derived.entry.path.as_slice() else {
             return Err(credential_err(
                 state,
                 &Error::catalog_invalid(format!(
                     "rulebook to_wallet path {:?} is not [namespace, element]",
-                    entry.path
+                    derived.entry.path
                 )),
             ));
         };
-        builder
-            .add_element(namespace, element, serde_json::json!(commitment))
-            .map_err(|e| credential_err(state, &e))?;
+        let value_type =
+            siros_issuer_core::catalog::claim_value_type(credential, namespace, element);
+        let form = siros_issuer_core::catalog::commitment_claim_form(
+            value_type,
+            derived.bytes.clone(),
+            derived.text.clone(),
+        )
+        .map_err(|e| credential_err(state, &e))?;
+        match form {
+            siros_issuer_core::catalog::CommitmentClaimForm::Bytes(bytes) => {
+                builder
+                    .add_bytes(namespace, element, bytes)
+                    .map_err(|e| credential_err(state, &e))?;
+            }
+            siros_issuer_core::catalog::CommitmentClaimForm::Text(text) => {
+                builder
+                    .add_element(namespace, element, serde_json::json!(text))
+                    .map_err(|e| credential_err(state, &e))?;
+            }
+        }
     }
     // The allocated status index rides the response-level credential
     // metadata (the mdoc analogue of the SD-JWT status claim).
@@ -2084,7 +2110,7 @@ async fn issue_mdoc_entries(
             claims: Vec::new(),
             auxiliary_data: to_wallet_entries
                 .iter()
-                .map(|(entry, _)| entry.clone())
+                .map(|derived| derived.entry.clone())
                 .collect(),
         });
     Ok((
@@ -2096,27 +2122,31 @@ async fn issue_mdoc_entries(
     ))
 }
 
-/// Build the to_wallet auxiliary-data entries for a rulebook session
-/// (design §8.3 item 3/5): one hash_commitment opening per configured
-/// derivation path, plus the wallet's commitments written into the
-/// document data.
-///
-/// The rulebook (config) supplies the derivations — e.g. nym_auth's
-/// `hash_commitment` at `["eu.europa.ec.eudi.nym_auth.1", "ssc"]` with an
-/// HKDF opening over `["issuing_country", "personal_administrative_number"]`
-/// — and this maps them onto the session's subject data.
+/// One derived to_wallet delivery (design §8.3 item 3): the response
+/// entry carries the opening, and the commitment rides the credential
+/// at the entry's path — in the form the CATALOG's declared
+/// `value_type` demands (issue #43): the raw bytes for a `bstr` claim,
+/// the configured-encoding text for a `tstr` claim. Which form rides is
+/// decided at the write, by the declared type, never here.
+pub struct DerivedCommitment {
+    pub entry: siros_issuer_core::zk::AuxiliaryDataEntry,
+    pub bytes: Vec<u8>,
+    pub text: String,
+}
+
 /// Derive a rulebook's to_wallet auxiliary data (design §8.3 items 3–4):
 /// for each configured entry, derive the opening from the session's
 /// subject data (the general derivation vocabulary — HKDF-from-secret,
 /// random, claim — chosen by config, not code), compute the commitment
-/// (hash_commitment, alg-registered), and hand back both: the entry
-/// (opening) rides the response, the encoded commitment rides the
-/// document at the entry's path.
+/// (hash_commitment, alg-registered), and hand back both forms: the
+/// entry (opening) rides the response; the commitment's credential-claim
+/// form is decided at the write by the catalog's declared `value_type`
+/// (issue #43 — `bytes` for a `bstr` claim, `text` for a `tstr` claim).
 fn derive_to_wallet(
     seeds: &crate::zk_seeds::SeedProviders,
     rulebook: &crate::config::RulebookCfg,
     subject: &serde_json::Value,
-) -> siros_issuer_core::Result<Vec<(siros_issuer_core::zk::AuxiliaryDataEntry, String)>> {
+) -> siros_issuer_core::Result<Vec<DerivedCommitment>> {
     use siros_issuer_core::zk::{encode_commitment, hash_commitment, AuxiliaryDataEntry, Opening};
 
     // The derivation inputs are subject claims. mdoc subjects nest
@@ -2183,8 +2213,8 @@ fn derive_to_wallet(
         let commitment = hash_commitment(&entry.alg, &opening_bytes)?;
         let encoding = entry.encoding.as_deref().unwrap_or("base64url");
         let commitment_text = encode_commitment(encoding, &commitment)?;
-        out.push((
-            AuxiliaryDataEntry {
+        out.push(DerivedCommitment {
+            entry: AuxiliaryDataEntry {
                 kind: "hash_commitment".to_owned(),
                 alg: entry.alg.clone(),
                 path: entry.path.clone(),
@@ -2202,8 +2232,9 @@ fn derive_to_wallet(
                 // parseDeliveries; the engine's leniency masked it).
                 encoding: None,
             },
-            commitment_text,
-        ));
+            bytes: commitment,
+            text: commitment_text,
+        });
     }
     Ok(out)
 }

@@ -143,6 +143,16 @@ impl MsoBuilder {
         self.push_item(namespace, element_id, Cbor::Tag(1004, Box::new(tstr(date))))
     }
 
+    /// Add a byte-string element (ISO 18013-5 element typing: the raw
+    /// bytes as a CBOR bstr). A catalog claim declared
+    /// `value_type: "bstr"` carries its value as bytes — a derived
+    /// commitment's 32 raw bytes, not a text encoding of them (issue
+    /// #43: the catalog's declared type is the wire contract the
+    /// wallets bind).
+    pub fn add_bytes(&mut self, namespace: &str, element_id: &str, bytes: Vec<u8>) -> Result<()> {
+        self.push_item(namespace, element_id, Cbor::Bytes(bytes))
+    }
+
     fn push_item(&mut self, namespace: &str, element_id: &str, element_value: Cbor) -> Result<()> {
         let salt_len = self.salt_policy.salt_bytes_for(element_id)?;
         let mut random = vec![0u8; salt_len];

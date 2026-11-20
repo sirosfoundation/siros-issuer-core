@@ -193,7 +193,8 @@
                 "name": "SSC commitment",
                 "locale": "en"
               }
-            ]
+            ],
+            "value_type": "bstr"
           }
         }
       }

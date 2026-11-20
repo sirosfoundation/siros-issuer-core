@@ -244,3 +244,58 @@ pub fn display_members(
     }
     (display, claims)
 }
+
+/// The catalog's declared `value_type` for one mdoc claim (the raw TS11
+/// body: `claims.<namespace>.<element>.value_type`). The declared type
+/// is the wire contract the wallets bind — the credential claim's CBOR
+/// encoding follows it, never a guess.
+pub fn claim_value_type<'a>(
+    credential: &'a CredentialType,
+    namespace: &str,
+    element: &str,
+) -> Option<&'a str> {
+    credential
+        .raw
+        .get("claims")?
+        .get(namespace)?
+        .get(element)?
+        .get("value_type")?
+        .as_str()
+}
+
+/// The credential-claim form a derived commitment takes (issue #43).
+#[derive(Debug)]
+pub enum CommitmentClaimForm {
+    /// A `value_type: "bstr"` claim: the raw commitment bytes as a CBOR
+    /// byte string — a 32-byte sha-256 commitment carried as bytes,
+    /// not a text encoding of them.
+    Bytes(Vec<u8>),
+    /// A `value_type: "tstr"` claim: the configured-encoding text.
+    Text(String),
+}
+
+/// Decide the credential-claim form of a derived commitment from the
+/// catalog's declared `value_type` (issue #43): `bstr` carries the raw
+/// bytes, `tstr` the configured-encoding text — anything else,
+/// **including an undeclared type, is a refusal**, never a guessed
+/// encoding. The leniency this replaces delivered the nym_auth ssc as
+/// 43-char base64url TEXT past the (encoding-aware) issuance gate and
+/// detonated at presentation, after consent, where the presenter binds
+/// the circuit input per the catalog type (SECRET_COMMITMENT,
+/// `SHA256(seed) == ssc` on a byte string that never was one).
+pub fn commitment_claim_form(
+    value_type: Option<&str>,
+    bytes: Vec<u8>,
+    text: String,
+) -> Result<CommitmentClaimForm> {
+    match value_type {
+        Some("bstr") => Ok(CommitmentClaimForm::Bytes(bytes)),
+        Some("tstr") => Ok(CommitmentClaimForm::Text(text)),
+        Some(other) => Err(Error::catalog_invalid(format!(
+            "the catalog declares value_type {other:?} for a commitment claim — not a commitment carrier"
+        ))),
+        None => Err(Error::catalog_invalid(
+            "the catalog element declares no value_type — a commitment claim's encoding would be a guess",
+        )),
+    }
+}

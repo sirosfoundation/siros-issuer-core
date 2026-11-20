@@ -3119,7 +3119,8 @@ async fn nym_auth_rulebook_issuance_resolves_salt_and_commitments_from_config() 
     );
 
     // 5. Oracle: the document's ssc element IS the commitment over that
-    //    opening (sha-256, base64url-encoded at the element).
+    //    opening (sha-256, the raw 32 bytes as a CBOR byte string — the
+    //    catalog's value_type: "bstr", issue #43).
     let issuer_signed_bytes = siros_issuer_core::sdjwt_issue::b64u_decode(
         credential["credentials"][0]["credential"].as_str().unwrap(),
     )
@@ -3170,14 +3171,16 @@ async fn nym_auth_rulebook_issuance_resolves_salt_and_commitments_from_config() 
         salt_lengths.push(random.len());
         if identifier.as_deref() == Some("ssc") {
             let value = find("elementValue").expect("elementValue");
-            let commitment_text = match &value {
-                ciborium::Value::Text(s) => s.clone(),
-                _ => panic!("ssc commitment is text (base64url-encoded)"),
-            };
-            ssc_commitment = Some(
-                siros_issuer_core::sdjwt_issue::b64u_decode(&commitment_text)
-                    .expect("commitment is base64url text"),
-            );
+            // Issue #43: the catalog declares ssc `value_type: "bstr"`
+            // — the element IS the raw commitment, a CBOR byte string,
+            // never a text encoding of it. The presenter binds
+            // SHA256(seed) == ssc over the 32 bytes; the old text
+            // encoding passed the encoding-aware issuance gate and
+            // refused here, at presentation, after consent.
+            ssc_commitment = Some(match &value {
+                ciborium::Value::Bytes(b) => b.clone(),
+                other => panic!("ssc is a CBOR byte string (bstr), not {other:?}"),
+            });
         }
     }
     // 4+1 elements: the four subject claims + the ssc commitment.
