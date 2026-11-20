@@ -187,6 +187,11 @@ pub struct AppState {
     /// false opts out. A to_wallet opening is refused in the clear
     /// EITHER way.
     pub response_encryption_required: bool,
+    /// Issue #41: emit the response-level credential_metadata display
+    /// members (config `issuance.emit_credential_metadata_on_response`,
+    /// default false — the OIDF suite's closed response set stays
+    /// clean; the display-bearing deployments opt in).
+    pub emit_credential_metadata_on_response: bool,
     /// The ARF disclosure policies (gap 3): per-credential, config-
     /// gated, absent by default (the conformance closed set).
     pub disclosure_policies:

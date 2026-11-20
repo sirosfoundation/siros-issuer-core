@@ -130,6 +130,14 @@ response_encryption_required = false
 static_dir = "{dir}/ts11"
 refresh_seconds = 0
 
+[issuance]
+# Issue #41: the display members ride the responses here (the nym_auth
+# e2e proves the vc-issuer's response wire shape — display + claims
+# around the auxiliary-data carrier). The default posture (false) is
+# the conformance fixture's — the OIDF suite's closed response set —
+# and that posture's oracle is the conformance pipeline itself.
+emit_credential_metadata_on_response = true
+
 # The ZK layer fixtures (design §8.3): the circuit manifest
 # (testdata/zkcircuits — vega-mc publishes saltBytes 32 for nym_auth)
 # and the nym_auth rulebook (rulebook #1): HKDF over
@@ -443,6 +451,7 @@ async fn spawn_service_full(
         pre_authorized_client_auth,
         refresh_token,
         response_encryption_required: config.issuer.response_encryption_required,
+        emit_credential_metadata_on_response: config.issuance.emit_credential_metadata_on_response,
         disclosure_policies: config.issuer.disclosure_policies.clone(),
         scopes: std::collections::HashMap::new(),
         endpoint_paths: siros_issuer_core::oid4vci::EndpointPaths {
@@ -3026,6 +3035,88 @@ async fn nym_auth_rulebook_issuance_resolves_salt_and_commitments_from_config() 
         siros_issuer_core::sdjwt_issue::b64u_decode(opening_b64).expect("opening is base64url");
     // HKDF opening length per the rulebook config: 16 bytes.
     assert_eq!(opening.len(), 16);
+
+    // 4b. Oracle (issue #41): the display members ride the same
+    //     credential_metadata — the vc-issuer's response shape. The
+    //     catalog document's display block (the registry VCTM's
+    //     mirror) arrives as `display`; its claims arrive as the
+    //     Appendix B.2 descriptions; the auxiliary-data carrier sits
+    //     between them unchanged (the knob ADDS members around the
+    //     openings, it never gates them).
+    let metadata = &credential["credential_metadata"];
+    let display: Vec<Value> =
+        serde_json::from_value(metadata["display"].clone()).expect("display objects");
+    assert_eq!(display.len(), 1, "one localized display object");
+    assert_eq!(display[0]["name"], "Nym authentication");
+    assert_eq!(display[0]["locale"], "en-US");
+    assert_eq!(
+        display[0]["description"],
+        "Anonymous/pseudonymous authentication attestation for zero-knowledge pseudonym and age predicate presentations"
+    );
+    assert_eq!(display[0]["background_color"], "#006400");
+    assert_eq!(display[0]["text_color"], "#ffffff");
+    // The card art: the SVG template rides rendering, and doubles as
+    // the logo (vc's mapSvgTemplates — the data: URI is the
+    // simple-rendering fallback a wallet draws).
+    let template = &display[0]["rendering"]["svg_templates"][0];
+    assert_eq!(template["properties"]["orientation"], "landscape");
+    let art = template["uri"].as_str().expect("the template URI");
+    assert!(
+        art.starts_with("data:image/svg+xml;base64,"),
+        "the card art is a data URI: {art:.40}…"
+    );
+    assert!(
+        art.len() > 1_000,
+        "the card art is the full SVG, not a stub"
+    );
+    assert_eq!(
+        display[0]["logo"]["uri"].as_str().map(str::len),
+        Some(art.len()),
+        "the first template doubles as the logo (vc's mapSvgTemplates)"
+    );
+    let claims: Vec<Value> =
+        serde_json::from_value(metadata["claims"].clone()).expect("claim descriptions");
+    // The B.2 descriptions: every catalog claim, in sorted path order,
+    // namespaced [doctype, element] for mdoc.
+    assert_eq!(
+        claims
+            .iter()
+            .map(|claim| claim["path"].clone())
+            .collect::<Vec<_>>(),
+        vec![
+            json!(["eu.europa.ec.eudi.nym_auth.1", "birth_date"]),
+            json!(["eu.europa.ec.eudi.nym_auth.1", "birthplace_country"]),
+            json!(["eu.europa.ec.eudi.nym_auth.1", "issuing_country"]),
+            json!([
+                "eu.europa.ec.eudi.nym_auth.1",
+                "personal_administrative_number"
+            ]),
+            json!(["eu.europa.ec.eudi.nym_auth.1", "ssc"]),
+        ],
+        "every catalog claim is described, in sorted path order"
+    );
+    let birth_date = claims
+        .iter()
+        .find(|claim| claim["path"] == json!(["eu.europa.ec.eudi.nym_auth.1", "birth_date"]))
+        .expect("the birth_date description");
+    assert_eq!(birth_date["mandatory"], true);
+    // vc's both-ways label rule: one spelling in (the MDDL `name`),
+    // both members out.
+    assert_eq!(birth_date["display"][0]["name"], "Date of birth");
+    assert_eq!(birth_date["display"][0]["label"], "Date of birth");
+    assert_eq!(birth_date["display"][0]["locale"], "en");
+    // The member set: display + claims around the openings — and never
+    // an empty member on the wire.
+    assert_eq!(
+        metadata
+            .as_object()
+            .expect("credential_metadata")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec!["auxiliary_data", "claims", "display"],
+        "the response metadata carries display and claims alongside the openings"
+    );
 
     // 5. Oracle: the document's ssc element IS the commitment over that
     //    opening (sha-256, base64url-encoded at the element).

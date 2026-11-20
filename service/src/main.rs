@@ -374,6 +374,7 @@ async fn run(config_path: &str) -> siros_issuer_core::Result<()> {
         pre_authorized_client_auth: config.authorization.pre_authorized_client_auth,
         refresh_token: config.authorization.refresh_token.clone(),
         response_encryption_required: config.issuer.response_encryption_required,
+        emit_credential_metadata_on_response: config.issuance.emit_credential_metadata_on_response,
         disclosure_policies: config.issuer.disclosure_policies.clone(),
         scopes: config.authorization.scopes.clone(),
         endpoint_paths,

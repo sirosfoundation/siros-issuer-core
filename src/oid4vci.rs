@@ -816,11 +816,118 @@ pub struct CredentialResponse {
     pub credential_metadata: Option<CredentialMetadata>,
 }
 
-/// Response-level credential metadata (the auxiliary-data extension's
-/// carrier).
+/// Response-level credential metadata. The auxiliary-data extension's
+/// carrier — and, when the deployment opts in
+/// (`issuance.emit_credential_metadata_on_response`, issue #41), the
+/// display members the vc-issuer embeds on its responses: `display`
+/// (the localized display objects) and `claims` (the Appendix B.2
+/// claim descriptions), the shape the gdc web wallet's
+/// `DisplayOnlyCredentialMetadataSerializer` decodes — a wallet that
+/// renders a vc-issued credential's SVG card renders ours identically.
+///
+/// The members are gated because the OIDF suite's response schema has a
+/// closed member set (`credential_metadata` on a non-rulebook
+/// credential is an unknown member): the default posture is OFF (the
+/// conformance fixture's), a wallet-serving deployment opts in (the
+/// realeyes fixture's) — vc's own `Delivery
+/// .EmitCredentialMetadataOnResponse` gate, same shape.
 #[derive(Debug, Serialize)]
 pub struct CredentialMetadata {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub display: Vec<CredentialMetadataDisplay>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub claims: Vec<ClaimDescription>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub auxiliary_data: Vec<crate::zk::AuxiliaryDataEntry>,
+}
+
+/// One localized display object for a credential (vc
+/// `CredentialMetadataDisplay`, `pkg/openid4vci/issuer_metadata.go`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CredentialMetadataDisplay {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locale: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logo: Option<MetadataLogo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rendering: Option<MetadataRendering>,
+}
+
+/// A display logo (vc `MetadataLogo`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MetadataLogo {
+    pub uri: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alt_text: Option<String>,
+}
+
+/// SVG template rendering (vc `MetadataRendering`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MetadataRendering {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub svg_templates: Vec<MetadataSvgTemplate>,
+}
+
+/// One SVG template (vc `MetadataSvgTemplate`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MetadataSvgTemplate {
+    pub uri: String,
+    /// The subresource-integrity member (`uri#integrity`).
+    #[serde(
+        rename = "uri#integrity",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub uri_integrity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub properties: Option<MetadataSvgTemplateProperties>,
+}
+
+/// The rendering context a template suits (vc
+/// `MetadataSvgTemplateProperties`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MetadataSvgTemplateProperties {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orientation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_scheme: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contrast: Option<String>,
+}
+
+/// One Appendix B.2 claim description (vc `ClaimDescription`): a claim's
+/// path, its SVG placeholder binding, its mandatoriness and its
+/// localized labels, for display purposes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ClaimDescription {
+    /// A claims path pointer. A `null` segment is an array-element
+    /// wildcard (`["nationalities", null]` — the VCTM pointer semantics
+    /// travel as-is, vc's own preservation rule).
+    pub path: Vec<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub svg_id: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mandatory: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub display: Vec<ClaimDisplayProperties>,
+}
+
+/// One localized claim label (vc `ClaimDisplayProperties`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ClaimDisplayProperties {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locale: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

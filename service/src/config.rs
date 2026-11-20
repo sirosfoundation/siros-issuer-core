@@ -391,6 +391,20 @@ pub struct IssuanceCfg {
     /// Final §9 `interval` guidance (seconds) in the pending response.
     #[serde(default = "default_deferred_interval")]
     pub deferred_interval_seconds: u64,
+    /// Issue #41 (vc `Delivery.EmitCredentialMetadataOnResponse`,
+    /// default false): emit the response-level `credential_metadata`
+    /// display members — `display` (the localized display objects) and
+    /// `claims` (the Appendix B.2 claim descriptions), mapped from the
+    /// credential's TS11 catalog document — alongside `auxiliary_data`
+    /// on Credential Responses. Off by default: the members are the
+    /// vc-issuer's extension shape, and the OIDF suite's response
+    /// schema has a closed member set (a `credential_metadata` on a
+    /// non-rulebook credential is an unknown member — the conformance
+    /// fixture leaves this unset). A deployment serving wallets that
+    /// render from the response (the gdc web wallet's
+    /// `DisplayOnlyCredentialMetadataSerializer`) opts in.
+    #[serde(default)]
+    pub emit_credential_metadata_on_response: bool,
 }
 
 fn default_deferred_interval() -> u64 {

@@ -1241,6 +1241,35 @@ async fn issue_session_entries(
             );
         }
     }
+    // Issue #41: the display members ride the response credential_metadata
+    // when the deployment opted in (`issuance.emit_credential_metadata_
+    // on_response`, vc's `Delivery.EmitCredentialMetadataOnResponse`):
+    // the TS11 catalog document's display content, mapped to the
+    // vc-issuer's wire shape — `display` and `claims` around the
+    // auxiliary-data carrier. The knob ADDS members around the carrier;
+    // it never gates it (the openings ride `credential_metadata`
+    // whatever the knob says — the rulebook's contract, unchanged). A
+    // document without display content adds nothing, and an empty
+    // credential_metadata object never reaches the wire.
+    if state.emit_credential_metadata_on_response {
+        if let Ok(credential) = siros_issuer_core::catalog::resolve(
+            &state.catalog_snapshot(),
+            &record.credential_configuration_id,
+        ) {
+            let (display, claims) = siros_issuer_core::catalog::display_members(credential);
+            if !display.is_empty() || !claims.is_empty() {
+                let metadata = metadata.get_or_insert_with(|| {
+                    siros_issuer_core::oid4vci::CredentialMetadata {
+                        display: Vec::new(),
+                        claims: Vec::new(),
+                        auxiliary_data: Vec::new(),
+                    }
+                });
+                metadata.display = display;
+                metadata.claims = claims;
+            }
+        }
+    }
     Ok((entries, metadata))
 }
 
@@ -2046,9 +2075,13 @@ async fn issue_mdoc_entries(
     let credential_b64 = siros_issuer_core::sdjwt_issue::b64u(&credential_bytes);
 
     // The auxiliary-data extension: openings for the rulebook's
-    // commitments (present only for rulebook-governed credentials).
+    // commitments (present only for rulebook-governed credentials). The
+    // display members (issue #41) attach around this carrier in
+    // issue_session_entries when the deployment opted in.
     let metadata =
         (!to_wallet_entries.is_empty()).then(|| siros_issuer_core::oid4vci::CredentialMetadata {
+            display: Vec::new(),
+            claims: Vec::new(),
             auxiliary_data: to_wallet_entries
                 .iter()
                 .map(|(entry, _)| entry.clone())
