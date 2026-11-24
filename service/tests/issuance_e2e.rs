@@ -5663,6 +5663,65 @@ async fn nested_claims_reach_the_wallet_at_their_own_path() {
     assert!(verified.claims.get("country").is_none());
 }
 
+/// SD-JWT VC type metadata `sd: "never"`: the claim rides the signed
+/// payload in the clear and has no disclosure; the claims without it are
+/// disclosures and only digests in the payload, nested members at their
+/// own path included. verifier-core verifies the mixed credential and
+/// resolves every claim where the subject has it.
+#[tokio::test]
+async fn a_never_disclosable_claim_is_issued_in_the_clear() {
+    let (issued, public) = issue_pid_with_claims(
+        |claims| {
+            for claim in claims.iter_mut() {
+                if claim["path"] == json!(["given_name"]) {
+                    claim["sd"] = json!("never");
+                }
+            }
+            claims.extend([
+                json!({"path": ["address"], "sd": "never"}),
+                json!({"path": ["address", "country"], "sd": "never"}),
+                json!({"path": ["address", "post_code"]}),
+            ]);
+        },
+        json!({
+            "given_name": "Anna", "family_name": "Andersson",
+            "address": {"country": "SE", "post_code": "11122"}
+        }),
+    )
+    .await;
+
+    let decode = |part: &str| -> Value {
+        serde_json::from_slice(&siros_issuer_core::sdjwt_issue::b64u_decode(part).unwrap()).unwrap()
+    };
+    let mut parts = issued.split('~');
+    let payload = decode(parts.next().unwrap().split('.').nth(1).unwrap());
+    assert_eq!(payload["given_name"], "Anna");
+    assert!(payload.get("family_name").is_none());
+    assert_eq!(payload["address"]["country"], "SE");
+    assert!(payload["address"].get("post_code").is_none());
+    assert!(payload.get("country").is_none());
+    let mut disclosed: Vec<String> = parts
+        .filter(|part| !part.is_empty())
+        .map(|part| decode(part)[1].as_str().unwrap().to_owned())
+        .collect();
+    disclosed.sort();
+    assert_eq!(disclosed, vec!["family_name", "post_code"]);
+
+    let verified = verify_sdjwt(
+        &issued,
+        &StaticKey(public),
+        &VerifyParams::new(now_unix(), HolderBinding::NotRequired),
+    )
+    .expect("verifier-core verifies the mixed credential");
+    assert_eq!(verified.claims["given_name"], "Anna");
+    assert_eq!(verified.claims["family_name"], "Andersson");
+    assert_eq!(
+        verified.claims["address"],
+        json!({"country": "SE", "post_code": "11122"})
+    );
+    assert!(verified.claims.get("post_code").is_none());
+}
+
 /// The knob's semantics (issue #21): default TRUE — encryption is used
 /// as much as possible; wallets can always use it (the suites are
 /// always advertised) and the issuer REQUIRES it unless the deployment

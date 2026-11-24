@@ -4,7 +4,7 @@
 //! verifier-core catalog contract.
 
 use serde_json::json;
-use siros_issuer_core::catalog::{build_catalog, credential_claims, resolve};
+use siros_issuer_core::catalog::{build_catalog, concealed_claims, credential_claims, resolve};
 use siros_issuer_core::oid4vci::{
     authorization_server_metadata, metadata_from_catalog, DisclosurePolicy, EndpointPaths,
     MDOC_FORMAT, SD_JWT_FORMAT,
@@ -443,26 +443,65 @@ fn pid_with_claims(claims: serde_json::Value) -> siros_issuer_core::Result<Crede
     Ok(resolve(&catalog, "urn:eudi:pid:1").unwrap().clone())
 }
 
+fn claims_and_concealed(
+    claims: serde_json::Value,
+    subject: serde_json::Value,
+) -> (serde_json::Value, Vec<Vec<String>>) {
+    let credential = pid_with_claims(claims).unwrap();
+    let claims = credential_claims(&credential, &subject);
+    let concealed = concealed_claims(&credential, &claims).unwrap();
+    (serde_json::Value::Object(claims), concealed)
+}
+
+/// SD-JWT VC type metadata `sd`: `never` is the only value that leaves a
+/// claim in the clear; `always`, `allowed` and an absent `sd` (default
+/// `allowed`) are concealed. An unknown value is a catalog refusal
+/// (fail-closed), never a default.
+#[test]
+fn claim_sd_never_is_the_only_undisclosable_value() {
+    let metadata = |sd: serde_json::Value| {
+        json!([
+            {"path": ["given_name"], "sd": sd},
+            {"path": ["family_name"], "sd": "always"},
+            {"path": ["birth_date"], "sd": "allowed"},
+            {"path": ["nationality"]},
+        ])
+    };
+    let subject = json!({
+        "given_name": "Anna", "family_name": "Andersson",
+        "birth_date": "1982-07-12", "nationality": "SE", "undeclared": "x",
+    });
+    let (claims, concealed) = claims_and_concealed(metadata(json!("never")), subject);
+    assert!(claims.get("undeclared").is_none());
+    assert_eq!(
+        json!(concealed),
+        json!([["birth_date"], ["family_name"], ["nationality"]])
+    );
+
+    for bad in [json!("Never"), json!(false), json!(null)] {
+        let error = pid_with_claims(metadata(bad)).unwrap_err();
+        assert_eq!(error.code, "catalog_invalid");
+    }
+}
+
 /// TS 119 602 / SD-JWT VC claim paths: a nested claim is a member of its
 /// parent, whichever is listed first, and never a top-level claim of its
 /// own. Undeclared siblings of a claim the metadata names only by its
 /// members stay out; a path into an array issues with the array.
 #[test]
 fn nested_claims_issue_at_their_own_path() {
-    let credential = pid_with_claims(json!([
-        {"path": ["address", "post_code"]},
-        {"path": ["address"]},
-        {"path": ["activity"]},
-        {"path": ["activity", "code"]},
-        {"path": ["contact", "email"]},
-        {"path": ["contact", "website"]},
-        {"path": ["representatives", null]},
-        {"path": ["representatives"]},
-    ]))
-    .unwrap();
-    let claims = credential_claims(
-        &credential,
-        &json!({
+    let (claims, concealed) = claims_and_concealed(
+        json!([
+            {"path": ["address", "post_code"]},
+            {"path": ["address"]},
+            {"path": ["activity"]},
+            {"path": ["activity", "code"]},
+            {"path": ["contact", "email"]},
+            {"path": ["contact", "website"]},
+            {"path": ["representatives", null]},
+            {"path": ["representatives"]},
+        ]),
+        json!({
             "address": {"post_code": "8900", "post_name": "Brønnøysund"},
             "activity": {"code": "49.410"},
             "contact": {"email": "a@example.org", "internal": "x"},
@@ -470,13 +509,47 @@ fn nested_claims_issue_at_their_own_path() {
         }),
     );
     assert_eq!(
-        serde_json::Value::Object(claims),
+        claims,
         json!({
             "address": {"post_code": "8900", "post_name": "Brønnøysund"},
             "activity": {"code": "49.410"},
             "contact": {"email": "a@example.org"},
             "representatives": [{"name": "Kari"}],
         })
+    );
+    // Concealed whole, one disclosure per top-level claim.
+    assert_eq!(
+        json!(concealed),
+        json!([["activity"], ["address"], ["contact"], ["representatives"]])
+    );
+}
+
+/// `sd` applies per claim path: in an object in the clear only the members
+/// declared without `never` are concealed; an object named only by its
+/// members is in the clear if one of them is `never`; a concealed object
+/// takes its members with it. Absent members yield no path.
+#[test]
+fn nested_claims_follow_their_own_sd() {
+    let (_, concealed) = claims_and_concealed(
+        json!([
+            {"path": ["clear"], "sd": "never"},
+            {"path": ["clear", "in"], "sd": "never"},
+            {"path": ["clear", "out"]},
+            {"path": ["clear", "absent"]},
+            {"path": ["members", "in"], "sd": "never"},
+            {"path": ["members", "out"], "sd": "always"},
+            {"path": ["hidden"]},
+            {"path": ["hidden", "in"], "sd": "never"},
+        ]),
+        json!({
+            "clear": {"in": 1, "out": 2},
+            "members": {"in": 1, "out": 2},
+            "hidden": {"in": 1},
+        }),
+    );
+    assert_eq!(
+        json!(concealed),
+        json!([["clear", "out"], ["hidden"], ["members", "out"]])
     );
 }
 

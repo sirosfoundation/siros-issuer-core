@@ -142,6 +142,10 @@ pub fn issue(signer: &dyn crate::signer::Signer, spec: &IssueSpec) -> Result<Iss
                     .as_array_mut()
                     .ok_or_else(|| Error::invalid_input("_sd is not an array"))?
                     .push(json!(digest));
+                // RFC 9901 §4.2.4.1: the digest order hides the claim order.
+                if let Some(sd) = obj.get_mut("_sd").and_then(Value::as_array_mut) {
+                    sd.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+                }
                 disclosures.push(raw);
             }
             Seg::Idx(i) => {
