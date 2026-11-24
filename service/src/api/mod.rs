@@ -171,7 +171,8 @@ pub struct AppState {
     /// IssuerSigned x5chain. Loaded from signing.cert_chain_path.
     pub cert_chain_der: Vec<Vec<u8>>,
     /// The signed-metadata signer and its x5c chain (config
-    /// `signing.metadata_jwk_path` + `metadata_cert_chain_path`). None:
+    /// `signing.metadata_jwk_path` or `signing.metadata_pkcs11`, with
+    /// `signing.metadata_cert_chain_path`). None:
     /// `signer` and `cert_chain_der` sign the metadata.
     pub metadata_signer: Option<MetadataSigner>,
     /// The signing effect interface (design §11.1): in-memory JWK provider

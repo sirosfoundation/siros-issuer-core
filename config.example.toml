@@ -28,7 +28,8 @@ retention_after_final_seconds = 86400
 # jwk_path = "issuer-sdjwt.jwk"
 # Optional, set together: a separate key and chain (PEM, leaf first) for the
 # signed issuer metadata (Final §12.2.2). Omitted: the credential signing key
-# and cert_chain_path sign it.
+# and cert_chain_path sign it. An HSM key instead of metadata_jwk_path:
+# [signing.metadata_pkcs11] below.
 # metadata_jwk_path = "issuer-metadata.jwk"
 # metadata_cert_chain_path = "issuer-metadata-chain.pem"
 
@@ -121,6 +122,16 @@ hkdf = { secret_b64url = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", inputs =
 # # pin = "issuer-test-pin-4321"
 # key_label = "issuer-signing"
 # kid = "issuer-signing-1"
+#
+# The metadata key on a token: [signing.metadata_pkcs11], with
+# signing.metadata_cert_chain_path, instead of signing.metadata_jwk_path.
+# It may be a key on the same token (then with the same pin) or on another.
+#
+# [signing.metadata_pkcs11]
+# module_path = "/usr/lib/softhsm/libsofthsm2.so"
+# # pin = "issuer-test-pin-4321"
+# key_label = "issuer-metadata"
+# kid = "issuer-metadata-1"
 
 [session]
 default_ttl_seconds = 300

@@ -58,7 +58,8 @@ jobs:
       - name: PKCS#11 tests
         run: >
           sudo -E env "PATH=$PATH" cargo test --locked -p siros-issuer-service
-          --test pkcs11_signer --test issuance_e2e hsm_
+          --test pkcs11_signer --test pkcs11_metadata_signer
+          --test issuance_e2e hsm_
 
   issuance-flow:
     # The npm UX module (§10): node tests. A tight timeout: this job

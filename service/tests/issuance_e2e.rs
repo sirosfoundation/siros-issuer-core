@@ -3517,9 +3517,20 @@ fn the_metadata_key_and_chain_are_set_together() {
     let chain_line = format!("metadata_cert_chain_path = \"{chain}\"\n");
     validate(String::new()).expect("neither set");
     validate(format!("{key_line}{chain_line}")).expect("both set");
+    // Design §11.1: the metadata key has the credential key's provider
+    // selection, an HSM key included, under the same refusals.
+    let hsm = |label: &str| {
+        format!(
+            "[signing.metadata_pkcs11]\nmodule_path = \"/hsm.so\"\nkey_label = \"{label}\"\nkid = \"m\"\n"
+        )
+    };
+    validate(format!("{chain_line}{}", hsm("metadata"))).expect("an HSM key and its chain");
     for refused in [
         key_line.clone(),
-        chain_line,
+        chain_line.clone(),
+        hsm("metadata"),
+        format!("{key_line}{chain_line}{}", hsm("metadata")),
+        format!("{chain_line}{}", hsm("")),
         format!("{key_line}metadata_cert_chain_path = \"{chain}.absent\"\n"),
     ] {
         assert_eq!(validate(refused).unwrap_err().code, "configuration");
@@ -5722,6 +5733,7 @@ async fn issue_pid_with_claims(
         None,
         None,
         suite_client_registry(),
+        None,
     )
     .await;
     let service = TestService {

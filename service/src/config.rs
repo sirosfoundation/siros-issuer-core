@@ -350,7 +350,8 @@ pub struct SigningCfg {
     /// advertises it — fine for development, never for production.
     pub jwk_path: Option<std::path::PathBuf>,
     /// The PKCS#11 (HSM) signing provider (design §11.1): present ⇒ the
-    /// token's key signs every issuer signature and **`jwk_path` must be
+    /// token's key signs every issuer signature (the metadata excepted
+    /// when it has its own key below) and **`jwk_path` must be
     /// absent** — one signing key, one provider, and an HSM deployment
     /// must never silently fall back to a file key.
     #[serde(default)]
@@ -372,9 +373,15 @@ pub struct SigningCfg {
     /// `metadata_cert_chain_path`.
     #[serde(default)]
     pub metadata_jwk_path: Option<std::path::PathBuf>,
+    /// The metadata key on a PKCS#11 token instead of in a file: the same
+    /// provider selection as `pkcs11`, and mutually exclusive with
+    /// `metadata_jwk_path`. May be on the same token as `pkcs11`. Must come
+    /// with `metadata_cert_chain_path`.
+    #[serde(default)]
+    pub metadata_pkcs11: Option<crate::pkcs11::Pkcs11Cfg>,
     /// The metadata key's certificate chain (PEM, leaf first): the
-    /// signed metadata's x5c. Required with, and only with,
-    /// `metadata_jwk_path`.
+    /// signed metadata's x5c. Required with, and only with, a metadata key
+    /// (`metadata_jwk_path` or `metadata_pkcs11`).
     #[serde(default)]
     pub metadata_cert_chain_path: Option<std::path::PathBuf>,
 }
@@ -606,39 +613,60 @@ impl Config {
         if let Some(login) = &self.authorization.login_url {
             url_check("authorization.login_url", login)?;
         }
-        if let Some(signing) = &self.signing.jwk_path {
-            if !signing.is_file() {
-                return Err(Error::configuration(format!(
-                    "signing.jwk_path {} does not exist",
-                    signing.display()
-                )));
+        // One signing key, one provider, for each signing surface: a PKCS#11
+        // configuration is an HSM deployment and must never silently fall
+        // back to a file key.
+        for (jwk_name, jwk_path, pkcs11_name, pkcs11) in [
+            (
+                "signing.jwk_path",
+                &self.signing.jwk_path,
+                "signing.pkcs11",
+                &self.signing.pkcs11,
+            ),
+            (
+                "signing.metadata_jwk_path",
+                &self.signing.metadata_jwk_path,
+                "signing.metadata_pkcs11",
+                &self.signing.metadata_pkcs11,
+            ),
+        ] {
+            if let Some(path) = jwk_path {
+                if !path.is_file() {
+                    return Err(Error::configuration(format!(
+                        "{jwk_name} {} does not exist",
+                        path.display()
+                    )));
+                }
+            }
+            if let Some(pkcs11) = pkcs11 {
+                if jwk_path.is_some() {
+                    return Err(Error::configuration(format!(
+                        "{jwk_name} and {pkcs11_name} are mutually exclusive — the HSM provider signs or the file key does, never both",
+                    )));
+                }
+                if pkcs11.key_label.is_empty() || pkcs11.module_path.is_empty() {
+                    return Err(Error::configuration(format!(
+                        "{pkcs11_name} needs module_path and key_label",
+                    )));
+                }
             }
         }
         // The metadata signer is a key and its chain: a key without a chain
         // has nothing to be trusted by, a chain without its key would ride
         // under the attestation key.
-        match (
-            &self.signing.metadata_jwk_path,
-            &self.signing.metadata_cert_chain_path,
-        ) {
-            (None, None) => {}
-            (Some(key), Some(chain)) => {
-                for (name, path) in [
-                    ("signing.metadata_jwk_path", key),
-                    ("signing.metadata_cert_chain_path", chain),
-                ] {
-                    if !path.is_file() {
-                        return Err(Error::configuration(format!(
-                            "{name} {} does not exist",
-                            path.display()
-                        )));
-                    }
-                }
-            }
-            _ => {
-                return Err(Error::configuration(
-                    "signing.metadata_jwk_path and signing.metadata_cert_chain_path must be set together",
-                ))
+        let metadata_key =
+            self.signing.metadata_jwk_path.is_some() || self.signing.metadata_pkcs11.is_some();
+        if metadata_key != self.signing.metadata_cert_chain_path.is_some() {
+            return Err(Error::configuration(
+                "signing.metadata_cert_chain_path must be set together with signing.metadata_jwk_path or signing.metadata_pkcs11",
+            ));
+        }
+        if let Some(chain) = &self.signing.metadata_cert_chain_path {
+            if !chain.is_file() {
+                return Err(Error::configuration(format!(
+                    "signing.metadata_cert_chain_path {} does not exist",
+                    chain.display()
+                )));
             }
         }
         if self.session.default_ttl_seconds == 0
@@ -647,20 +675,6 @@ impl Config {
             return Err(Error::configuration(
                 "session.default_ttl_seconds must be in 1..=max_ttl_seconds",
             ));
-        }
-        // One signing key, one provider: a PKCS#11 configuration is an HSM
-        // deployment and must never silently fall back to a file key.
-        if let Some(pkcs11) = &self.signing.pkcs11 {
-            if self.signing.jwk_path.is_some() {
-                return Err(Error::configuration(
-                    "signing.jwk_path and signing.pkcs11 are mutually exclusive — the HSM provider signs or the file key does, never both",
-                ));
-            }
-            if pkcs11.key_label.is_empty() || pkcs11.module_path.is_empty() {
-                return Err(Error::configuration(
-                    "signing.pkcs11 needs module_path and key_label",
-                ));
-            }
         }
         // A credential governed by two rulebooks is ambiguous — which
         // bundle governs its issuance? Refused at startup, never picked

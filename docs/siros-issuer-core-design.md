@@ -1231,10 +1231,17 @@ byte-identity; `iat`/`exp` the signing window). E2e-oracled: header
 type/key, verification under the header key (= the JWKS key), `sub`
 equality, and the document (claims stripped) equal to the plain document.
 A trust framework may list the metadata signer apart from the attestation
-signer: `signing.metadata_jwk_path` + `signing.metadata_cert_chain_path`
-(both or neither) sign the metadata, and only it, with that key and chain.
+signer: a metadata key (`signing.metadata_jwk_path`, or
+`[signing.metadata_pkcs11]` for an HSM-resident key — the provider
+selection of §11.1, mutually exclusive) and
+`signing.metadata_cert_chain_path` (key and chain, or neither) sign the
+metadata, and only it, with that key and chain. Keys on one token share its
+PKCS#11 session: login state is per token, a second `C_Login` is refused.
 That key is not in `/jwks`, which publishes the attestation key; the
-header `x5c` is how it is trusted.
+header `x5c` is how it is trusted. Each configured chain
+(`signing.cert_chain_path`, `signing.metadata_cert_chain_path`) must start
+with the certificate of its signing key (RFC 7515 §4.1.6, RFC 9360 §2);
+anything else is a startup refusal.
 
 **Batch issuance** (OID4VCI 1.0 Final §12.2.2, implemented post-P3):
 advertised as `batch_credential_issuance: {batch_size}` ONLY (from

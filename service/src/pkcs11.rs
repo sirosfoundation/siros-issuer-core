@@ -18,7 +18,7 @@
 //! for JWKS/evidence/thumbprints; the private key never leaves the
 //! token.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use kryptering::pkcs11::{Pkcs11Provider, Pkcs11Session, Pkcs11Signer as KrypteringSigner};
 
@@ -26,8 +26,9 @@ use siros_issuer_core::error::code;
 use siros_issuer_core::signer::Signer;
 use siros_issuer_core::{Error, Result};
 
-/// PKCS#11 signing configuration (`[signing.pkcs11]`). Present ⇒ the
-/// PKCS#11 provider replaces the in-memory JWK (the two are mutually
+/// PKCS#11 signing configuration (`[signing.pkcs11]`,
+/// `[signing.metadata_pkcs11]`). Present ⇒ the PKCS#11 provider replaces
+/// the in-memory JWK for that signing surface (the two are mutually
 /// exclusive: one signing key, one provider).
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -63,24 +64,68 @@ pub struct Pkcs11SignerProvider {
 }
 
 impl Pkcs11SignerProvider {
-    /// Open the session, find the key, and read the public JWK: startup
-    /// work, so a misconfigured module/key fails fast at boot — never
-    /// at first issuance.
+    /// Connect `[signing.pkcs11]` alone.
     pub fn connect(cfg: &Pkcs11Cfg) -> Result<Self> {
+        Pkcs11Tokens::default().signer("signing.pkcs11", cfg)
+    }
+}
+
+/// The tokens logged in to during startup, so that keys on one token share
+/// its session. PKCS#11 login state belongs to the application and the
+/// token, not to the session: a second `C_Login` on the same token fails
+/// with `CKR_USER_ALREADY_LOGGED_IN` without checking the PIN (PKCS#11
+/// v2.40 §5.6, `C_Login`).
+#[derive(Default)]
+pub struct Pkcs11Tokens(Vec<Token>);
+
+struct Token {
+    module: PathBuf,
+    slot: u64,
+    pin: Option<String>,
+    session: Pkcs11Session,
+}
+
+impl Pkcs11Tokens {
+    /// Open the session (or reuse the token's), find the key, and read the
+    /// public JWK: startup work, so a misconfigured module/key fails fast
+    /// at boot — never at first issuance. `section` names the configuration
+    /// section in refusals.
+    pub fn signer(&mut self, section: &str, cfg: &Pkcs11Cfg) -> Result<Pkcs11SignerProvider> {
+        let session = self.session(section, cfg)?;
+
+        // ES256 is the one issuer algorithm (advertised everywhere);
+        // kryptering validates the key's curve (CKA_EC_PARAMS) against it
+        // at handle time.
+        let algorithm = jose_rs::JwsAlgorithm::from_str(siros_issuer_core::signer::JWS_ALG)
+            .expect("ES256 is a known JWS algorithm")
+            .to_crypto()
+            .expect("ES256 maps to a crypto algorithm");
+        let signer = KrypteringSigner::new(session, &cfg.key_label, algorithm)
+            .map_err(|e| Error::configuration(format!("{section} key {:?}: {e}", cfg.key_label)))?;
+
+        // The public JWK from the token (public material): the private
+        // key never leaves it.
+        let public = public_jwk(section, session, &cfg.key_label, &cfg.kid)?;
+        Ok(Pkcs11SignerProvider { signer, public })
+    }
+
+    /// The authenticated session on the token `cfg` selects.
+    fn session(&mut self, section: &str, cfg: &Pkcs11Cfg) -> Result<&Pkcs11Session> {
         if !Path::new(&cfg.module_path).is_file() {
             return Err(Error::configuration(format!(
-                "signing.pkcs11.module_path {} is not a file",
+                "{section}.module_path {} is not a file",
                 cfg.module_path
             )));
         }
+        let module = Path::new(&cfg.module_path).canonicalize().map_err(|e| {
+            Error::configuration(format!("{section} module {}: {e}", cfg.module_path))
+        })?;
         let started = std::time::Instant::now();
         let provider = match cfg.slot_id {
-            Some(slot) => Pkcs11Provider::new_with_slot_id(Path::new(&cfg.module_path), slot),
-            None => Pkcs11Provider::new(Path::new(&cfg.module_path)),
+            Some(slot) => Pkcs11Provider::new_with_slot_id(&module, slot),
+            None => Pkcs11Provider::new(&module),
         }
-        .map_err(|e| {
-            Error::configuration(format!("signing.pkcs11 module {}: {e}", cfg.module_path))
-        })?;
+        .map_err(|e| Error::configuration(format!("{section} module {}: {e}", cfg.module_path)))?;
         let elapsed = started.elapsed();
         if elapsed > std::time::Duration::from_secs(5) {
             // kryptering has no logging dependency — the caller warns.
@@ -90,32 +135,36 @@ impl Pkcs11SignerProvider {
             );
         }
 
+        // The resolved slot, not the configured one: an absent slot_id and
+        // an explicit one can select the same token.
+        let slot = provider.slot_id();
+        if let Some(index) = self
+            .0
+            .iter()
+            .position(|token| token.module == module && token.slot == slot)
+        {
+            // The token would not check this PIN, so a different one is
+            // refused here.
+            if self.0[index].pin != cfg.pin {
+                return Err(Error::configuration(format!(
+                    "{section}.pin differs from the PIN already used for the same token (slot {slot})"
+                )));
+            }
+            return Ok(&self.0[index].session);
+        }
+
         let session = match cfg.pin.as_deref() {
             Some(pin) => provider.open_session(pin),
             None => provider.open_session_bytes(b""),
         }
-        .map_err(|e| {
-            Error::configuration(format!(
-                "signing.pkcs11 session on slot {}: {e}",
-                provider.slot_id()
-            ))
-        })?;
-
-        // ES256 is the one issuer algorithm (advertised everywhere);
-        // kryptering validates the key's curve (CKA_EC_PARAMS) against it
-        // at handle time.
-        let algorithm = jose_rs::JwsAlgorithm::from_str(siros_issuer_core::signer::JWS_ALG)
-            .expect("ES256 is a known JWS algorithm")
-            .to_crypto()
-            .expect("ES256 maps to a crypto algorithm");
-        let signer = KrypteringSigner::new(&session, &cfg.key_label, algorithm).map_err(|e| {
-            Error::configuration(format!("signing.pkcs11 key {:?}: {e}", cfg.key_label))
-        })?;
-
-        // The public JWK from the token (public material): the private
-        // key never leaves it.
-        let public = public_jwk(&session, &cfg.key_label, &cfg.kid)?;
-        Ok(Self { signer, public })
+        .map_err(|e| Error::configuration(format!("{section} session on slot {slot}: {e}")))?;
+        self.0.push(Token {
+            module,
+            slot,
+            pin: cfg.pin.clone(),
+            session,
+        });
+        Ok(&self.0.last().expect("just pushed").session)
     }
 }
 
@@ -161,10 +210,15 @@ impl Signer for Pkcs11SignerProvider {
 
 /// Read the token's public key (found by the private key's label) and
 /// convert it to a P-256 JWK. Public material only.
-fn public_jwk(session: &Pkcs11Session, label: &str, kid: &str) -> Result<jose_rs::jwk::Jwk> {
+fn public_jwk(
+    section: &str,
+    session: &Pkcs11Session,
+    label: &str,
+    kid: &str,
+) -> Result<jose_rs::jwk::Jwk> {
     let handle = session
         .find_public_key(label)
-        .map_err(|e| Error::configuration(format!("signing.pkcs11 public key {:?}: {e}", label)))?;
+        .map_err(|e| Error::configuration(format!("{section} public key {label:?}: {e}")))?;
     let inner = session.session();
     let guard = inner
         .lock()

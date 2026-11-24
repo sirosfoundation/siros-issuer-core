@@ -414,7 +414,7 @@ pub fn verify_attestation_proof(
     Ok(keys.remove(0))
 }
 
-fn leaf_verifying_key(der: &[u8]) -> Result<p256::ecdsa::VerifyingKey> {
+pub(crate) fn leaf_verifying_key(der: &[u8]) -> Result<p256::ecdsa::VerifyingKey> {
     use x509_cert::der::{Decode, Encode};
     let cert = x509_cert::Certificate::from_der(der)
         .map_err(|_| Error::new(code::INVALID_PROOF, "x5c leaf not a certificate"))?;
@@ -445,7 +445,7 @@ fn spki_raw_bytes(spki_der: &[u8]) -> Option<Vec<u8>> {
 
 /// The x5c leaf's P-256 public key as a JWK (no alg pin — jose_rs checks
 /// the header alg against the key's curve) for `verify_with_jwk`.
-fn leaf_to_jwk(key: &p256::ecdsa::VerifyingKey) -> Result<Jwk> {
+pub(crate) fn leaf_to_jwk(key: &p256::ecdsa::VerifyingKey) -> Result<Jwk> {
     let point = key.to_encoded_point(false);
     let bytes = point.as_bytes();
     // SEC1 uncompressed: 0x04 || X || Y.
