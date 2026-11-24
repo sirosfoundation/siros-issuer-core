@@ -1230,6 +1230,11 @@ claims** (`sub` = `iss` = the credential issuer identifier, §12.2.3
 byte-identity; `iat`/`exp` the signing window). E2e-oracled: header
 type/key, verification under the header key (= the JWKS key), `sub`
 equality, and the document (claims stripped) equal to the plain document.
+A trust framework may list the metadata signer apart from the attestation
+signer: `signing.metadata_jwk_path` + `signing.metadata_cert_chain_path`
+(both or neither) sign the metadata, and only it, with that key and chain.
+That key is not in `/jwks`, which publishes the attestation key; the
+header `x5c` is how it is trusted.
 
 **Batch issuance** (OID4VCI 1.0 Final §12.2.2, implemented post-P3):
 advertised as `batch_credential_issuance: {batch_size}` ONLY (from

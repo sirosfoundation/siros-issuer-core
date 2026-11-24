@@ -109,6 +109,9 @@ pub fn auxiliary_data_plans(
     Ok(plans)
 }
 
+/// The signed-metadata signer and its x5c chain (DER, leaf first).
+pub type MetadataSigner = (Arc<dyn Signer>, Vec<Vec<u8>>);
+
 /// The application state shared by every handler: the working catalog
 /// snapshot, the session store, the signer effect interface, the PDP —
 /// every boundary the handlers consume (design §4.3, §11).
@@ -167,6 +170,10 @@ pub struct AppState {
     /// The issuer's certificate chain (DER, leaf first): the mdoc
     /// IssuerSigned x5chain. Loaded from signing.cert_chain_path.
     pub cert_chain_der: Vec<Vec<u8>>,
+    /// The signed-metadata signer and its x5c chain (config
+    /// `signing.metadata_jwk_path` + `metadata_cert_chain_path`). None:
+    /// `signer` and `cert_chain_der` sign the metadata.
+    pub metadata_signer: Option<MetadataSigner>,
     /// The signing effect interface (design §11.1): in-memory JWK provider
     /// or PKCS#11 HSM provider — issuance code never touches key material.
     pub signer: Arc<dyn Signer>,

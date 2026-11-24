@@ -26,6 +26,11 @@ retention_after_final_seconds = 86400
 # (development only — restarts rotate the key).
 [signing]
 # jwk_path = "issuer-sdjwt.jwk"
+# Optional, set together: a separate key and chain (PEM, leaf first) for the
+# signed issuer metadata (Final §12.2.2). Omitted: the credential signing key
+# and cert_chain_path sign it.
+# metadata_jwk_path = "issuer-metadata.jwk"
+# metadata_cert_chain_path = "issuer-metadata-chain.pem"
 
 [issuance]
 credential_validity_seconds = 3600

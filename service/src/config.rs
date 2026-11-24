@@ -364,6 +364,19 @@ pub struct SigningCfg {
     /// The issuer's certificate chain (PEM, leaf first): the mdoc
     /// IssuerSigned x5chain. Required for mso_mdoc issuance.
     pub cert_chain_path: Option<std::path::PathBuf>,
+    /// A separate key (JWK JSON) for the signed credential-issuer
+    /// metadata (Final §12.2.2) only. Absent: the issuing key signs it.
+    /// A trust framework may anchor the metadata signer on a different
+    /// list than the attestation signer (WE BUILD: the WRP access
+    /// certificate on the WRPAC Providers list). Must come with
+    /// `metadata_cert_chain_path`.
+    #[serde(default)]
+    pub metadata_jwk_path: Option<std::path::PathBuf>,
+    /// The metadata key's certificate chain (PEM, leaf first): the
+    /// signed metadata's x5c. Required with, and only with,
+    /// `metadata_jwk_path`.
+    #[serde(default)]
+    pub metadata_cert_chain_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -599,6 +612,33 @@ impl Config {
                     "signing.jwk_path {} does not exist",
                     signing.display()
                 )));
+            }
+        }
+        // The metadata signer is a key and its chain: a key without a chain
+        // has nothing to be trusted by, a chain without its key would ride
+        // under the attestation key.
+        match (
+            &self.signing.metadata_jwk_path,
+            &self.signing.metadata_cert_chain_path,
+        ) {
+            (None, None) => {}
+            (Some(key), Some(chain)) => {
+                for (name, path) in [
+                    ("signing.metadata_jwk_path", key),
+                    ("signing.metadata_cert_chain_path", chain),
+                ] {
+                    if !path.is_file() {
+                        return Err(Error::configuration(format!(
+                            "{name} {} does not exist",
+                            path.display()
+                        )));
+                    }
+                }
+            }
+            _ => {
+                return Err(Error::configuration(
+                    "signing.metadata_jwk_path and signing.metadata_cert_chain_path must be set together",
+                ))
             }
         }
         if self.session.default_ttl_seconds == 0

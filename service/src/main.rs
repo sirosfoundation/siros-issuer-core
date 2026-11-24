@@ -20,7 +20,13 @@ use url::Url;
 fn build_signer(
     config: &Config,
 ) -> siros_issuer_core::Result<siros_issuer_core::signer::JwkSigner> {
-    let mut jwk = match &config.signing.jwk_path {
+    build_jwk_signer(config.signing.jwk_path.as_deref())
+}
+
+fn build_jwk_signer(
+    jwk_path: Option<&std::path::Path>,
+) -> siros_issuer_core::Result<siros_issuer_core::signer::JwkSigner> {
+    let mut jwk = match jwk_path {
         Some(path) => {
             let text = std::fs::read_to_string(path).map_err(|e| {
                 siros_issuer_core::Error::configuration(format!("reading {}: {e}", path.display()))
@@ -382,6 +388,7 @@ async fn run(config_path: &str) -> siros_issuer_core::Result<()> {
         deferred_interval_seconds: config.issuance.deferred_interval_seconds,
         request_encryption_key,
         cert_chain_der: load_cert_chain(&config),
+        metadata_signer: load_metadata_signer(&config),
         attestation: attestation_policy.clone(),
         wallet_attestation,
         signer: signer_dyn.clone(),
@@ -520,6 +527,24 @@ fn load_cert_chain(config: &Config) -> Vec<Vec<u8>> {
     let Some(path) = &config.signing.cert_chain_path else {
         return Vec::new();
     };
+    load_pem_chain(path)
+}
+
+/// The signed-metadata signer (`signing.metadata_jwk_path` +
+/// `metadata_cert_chain_path`). None when neither is set: the
+/// attestation signer and its chain then sign the metadata. One without
+/// the other is refused by `Config::validate`.
+fn load_metadata_signer(config: &Config) -> Option<api::MetadataSigner> {
+    let jwk_path = config.signing.metadata_jwk_path.as_deref()?;
+    let chain_path = config.signing.metadata_cert_chain_path.as_deref()?;
+    let signer = build_jwk_signer(Some(jwk_path)).unwrap_or_else(|e| {
+        eprintln!("siros-issuer-service: signing.metadata_jwk_path: {e}");
+        std::process::exit(1);
+    });
+    Some((Arc::new(signer), load_pem_chain(chain_path)))
+}
+
+fn load_pem_chain(path: &std::path::Path) -> Vec<Vec<u8>> {
     let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
         eprintln!("siros-issuer-service: reading cert chain {path:?}: {e}");
         std::process::exit(1);
