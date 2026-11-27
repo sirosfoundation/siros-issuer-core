@@ -4,12 +4,12 @@
 //! verifier-core catalog contract.
 
 use serde_json::json;
-use siros_issuer_core::catalog::{build_catalog, resolve};
+use siros_issuer_core::catalog::{build_catalog, credential_claims, resolve};
 use siros_issuer_core::oid4vci::{
     authorization_server_metadata, metadata_from_catalog, DisclosurePolicy, EndpointPaths,
     MDOC_FORMAT, SD_JWT_FORMAT,
 };
-use siros_verifier_core::ts11::{parse_schema_page, RegistryDocument, SchemaMeta};
+use siros_verifier_core::ts11::{parse_schema_page, CredentialType, RegistryDocument, SchemaMeta};
 use url::Url;
 
 fn fixtures() -> (Vec<SchemaMeta>, Vec<RegistryDocument>) {
@@ -427,4 +427,76 @@ fn a_configured_disclosure_policy_rides_its_own_configuration() {
             "{id} absent by default: {configuration:?}"
         );
     }
+}
+
+/// The PID of the fixtures with its claim metadata replaced.
+fn pid_with_claims(claims: serde_json::Value) -> siros_issuer_core::Result<CredentialType> {
+    let (_, mut documents) = fixtures();
+    let document = documents
+        .iter_mut()
+        .find(|document| document.format == SD_JWT_FORMAT)
+        .unwrap();
+    let mut body: serde_json::Value = serde_json::from_slice(&document.body).unwrap();
+    body["claims"] = claims;
+    document.body = serde_json::to_vec(&body).unwrap();
+    let catalog = build_catalog(documents)?;
+    Ok(resolve(&catalog, "urn:eudi:pid:1").unwrap().clone())
+}
+
+/// TS 119 602 / SD-JWT VC claim paths: a nested claim is a member of its
+/// parent, whichever is listed first, and never a top-level claim of its
+/// own. Undeclared siblings of a claim the metadata names only by its
+/// members stay out; a path into an array issues with the array.
+#[test]
+fn nested_claims_issue_at_their_own_path() {
+    let credential = pid_with_claims(json!([
+        {"path": ["address", "post_code"]},
+        {"path": ["address"]},
+        {"path": ["activity"]},
+        {"path": ["activity", "code"]},
+        {"path": ["contact", "email"]},
+        {"path": ["contact", "website"]},
+        {"path": ["representatives", null]},
+        {"path": ["representatives"]},
+    ]))
+    .unwrap();
+    let claims = credential_claims(
+        &credential,
+        &json!({
+            "address": {"post_code": "8900", "post_name": "Brønnøysund"},
+            "activity": {"code": "49.410"},
+            "contact": {"email": "a@example.org", "internal": "x"},
+            "representatives": [{"name": "Kari"}],
+        }),
+    );
+    assert_eq!(
+        serde_json::Value::Object(claims),
+        json!({
+            "address": {"post_code": "8900", "post_name": "Brønnøysund"},
+            "activity": {"code": "49.410"},
+            "contact": {"email": "a@example.org"},
+            "representatives": [{"name": "Kari"}],
+        })
+    );
+}
+
+/// Design §8.1: the elements of an array issue with the array's own claim,
+/// so a path into an array whose own path is not declared is a catalog
+/// fault, never a claim that is silently absent. A declared ancestor of the
+/// array is not the array.
+#[test]
+fn a_path_into_an_undeclared_array_is_refused() {
+    for claims in [
+        json!([{"path": ["representatives", null]}]),
+        json!([{"path": ["org"]}, {"path": ["org", "representatives", null]}]),
+        json!([{"path": [null]}]),
+    ] {
+        let error = pid_with_claims(claims.clone()).expect_err(&claims.to_string());
+        assert_eq!(error.code, "catalog_invalid", "{claims}");
+    }
+    pid_with_claims(json!([
+        {"path": ["org", "representatives", null]},
+        {"path": ["org", "representatives"]},
+    ]))
+    .expect("the array's own path is declared");
 }

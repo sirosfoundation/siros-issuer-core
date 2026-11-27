@@ -1809,9 +1809,9 @@ async fn issue_sdjwt_entry(
 
     // The catalog credential is the authority on which subject claims
     // become credential claims (design §5: catalog-driven, fail-closed):
-    // dc+sd-jwt paths are [claim]; anything else in the subject (e.g. a
-    // nested mdoc namespace block from a merged integrator payload)
-    // never leaks into the credential.
+    // each claim issues at its own path; anything else in the subject
+    // (e.g. a nested mdoc namespace block from a merged integrator
+    // payload) never leaks into the credential.
     let catalog = state.catalog_snapshot();
     let credential =
         siros_issuer_core::catalog::resolve(&catalog, &record.credential_configuration_id)
@@ -1844,18 +1844,12 @@ async fn issue_sdjwt_entry(
             },
         },
     });
-    let claims_object = claims.as_object_mut().expect("claims literal is an object");
-    for claim in &credential.claims {
-        // Absent optional claims are skipped; mandatories were gated at
-        // session creation.
-        let Some(value) = resolve_claim_path(subject, &claim.path) else {
-            continue;
-        };
-        let Some(name) = claim.path.last().and_then(|seg| seg.as_deref()) else {
-            continue;
-        };
-        claims_object.insert(name.to_owned(), value.clone());
-    }
+    claims
+        .as_object_mut()
+        .expect("claims literal is an object")
+        .extend(siros_issuer_core::catalog::credential_claims(
+            credential, subject,
+        ));
 
     // Conceal every subject claim: selective disclosure for all of them.
     let conceal = claims

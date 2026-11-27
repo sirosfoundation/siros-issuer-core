@@ -12,7 +12,80 @@ use siros_verifier_core::ts11::{Catalog, CredentialType, RegistryDocument};
 /// Build the working catalog from registry documents. Verifier-core
 /// validation errors are mapped to the `catalog_invalid` refusal.
 pub fn build_catalog(documents: Vec<RegistryDocument>) -> Result<Catalog> {
-    Catalog::from_documents(documents).map_err(Error::from)
+    let catalog = Catalog::from_documents(documents).map_err(Error::from)?;
+    for credential in &catalog.credentials {
+        array_claims_declared(credential)?;
+    }
+    Ok(catalog)
+}
+
+/// A path into an array (`null` segment, which verifier-core accepts only
+/// in last position) has no claim of its own: its elements issue with the
+/// array's claim (see [`credential_claims`]). Without that claim it would
+/// be silently absent from every credential, so the catalog is refused.
+fn array_claims_declared(credential: &CredentialType) -> Result<()> {
+    for claim in &credential.claims {
+        let Some((None, array)) = claim.path.split_last() else {
+            continue;
+        };
+        if !credential.claims.iter().any(|other| other.path == array) {
+            return Err(Error::catalog_invalid(format!(
+                "{}: claim path {} addresses the elements of an array whose own path is not declared",
+                credential.identifier,
+                serde_json::json!(claim.path),
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The dc+sd-jwt credential claims of a subject: every catalog claim the
+/// subject has, at its own path — `["registered_address", "post_code"]`
+/// is a member of `registered_address`, never a top-level `post_code`.
+/// Nothing the catalog does not name becomes a claim.
+pub fn credential_claims(
+    credential: &CredentialType,
+    subject: &serde_json::Value,
+) -> serde_json::Map<String, serde_json::Value> {
+    use serde_json::{Map, Value};
+
+    let mut claims = Map::new();
+    'claims: for claim in &credential.claims {
+        let mut value = subject;
+        let mut names = Vec::new();
+        for segment in &claim.path {
+            // Absent optional claims are skipped (mandatories were gated at
+            // session creation), and so is a path into an array: the
+            // array's own claim carries its elements, and `build_catalog`
+            // refuses a catalog that does not declare it.
+            let Some(name) = segment.as_deref() else {
+                continue 'claims;
+            };
+            let Some(next) = value.get(name) else {
+                continue 'claims;
+            };
+            names.push(name);
+            value = next;
+        }
+        let Some((last, parents)) = names.split_last() else {
+            continue;
+        };
+        // The claims mirror the subject's own structure, so every parent
+        // is an object, whichever of parent and child is listed first.
+        let mut target = &mut claims;
+        for parent in parents {
+            let Some(object) = target
+                .entry(*parent)
+                .or_insert_with(|| Value::Object(Map::new()))
+                .as_object_mut()
+            else {
+                continue 'claims;
+            };
+            target = object;
+        }
+        target.insert((*last).to_owned(), value.clone());
+    }
+    claims
 }
 
 /// Resolve a credential by any of its identifiers: vct (dc+sd-jwt), doctype

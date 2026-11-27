@@ -419,9 +419,44 @@ async fn spawn_service_full(
     >,
     clients: siros_issuer_service::client_auth::ClientRegistry,
 ) -> SignerAgnosticService {
+    spawn_service_with_config(
+        fixture_config(),
+        pdp,
+        allocator,
+        signer,
+        _public,
+        cert_chain_der,
+        deferred,
+        binding,
+        pre_authorized_client_auth,
+        refresh_token,
+        wallet_attestation,
+        clients,
+    )
+    .await
+}
+
+/// [`spawn_service_full`] over a configuration of the test's own (another
+/// catalog directory).
+#[allow(clippy::too_many_arguments)]
+async fn spawn_service_with_config(
+    config: Config,
+    pdp: Arc<dyn TrustPdp>,
+    allocator: Arc<RecordingAllocator>,
+    signer: Arc<dyn siros_issuer_core::signer::Signer>,
+    _public: jose_rs::jwk::Jwk,
+    cert_chain_der: Vec<Vec<u8>>,
+    deferred: bool,
+    binding: Option<siros_issuer_service::config::PreAuthBindingCfg>,
+    pre_authorized_client_auth: siros_issuer_service::config::PreAuthorizedClientAuth,
+    refresh_token: Option<siros_issuer_service::config::RefreshTokenCfg>,
+    wallet_attestation: Option<
+        Arc<siros_issuer_service::wallet_attestation::WalletAttestationEvaluator>,
+    >,
+    clients: siros_issuer_service::client_auth::ClientRegistry,
+) -> SignerAgnosticService {
     // Any port: issuer_base is what signed URLs carry; bind 0 and use it.
     let issuer_base = Url::parse("http://127.0.0.1:8080").unwrap();
-    let config = fixture_config();
     let source = fetch::CatalogSource::from_config(&config.catalog).unwrap();
     let catalog =
         futures_util::FutureExt::now_or_never(async { fetch::load_catalog(&source).await })
@@ -5531,6 +5566,101 @@ fn issuer_display_name_is_optional() {
         parse("display_name = \"Example Issuer\"").as_deref(),
         Some("Example Issuer")
     );
+}
+
+/// Issue a PID from a catalog whose PID claim metadata `edit` changed, end to
+/// end: the credential in the wallet and the issuer's public key.
+async fn issue_pid_with_claims(
+    edit: impl FnOnce(&mut Vec<Value>),
+    subject: Value,
+) -> (String, jose_rs::jwk::Jwk) {
+    let testdata = Path::new(env!("CARGO_MANIFEST_DIR")).join("../testdata/ts11");
+    let catalog = tempfile::tempdir().unwrap();
+    std::fs::copy(
+        testdata.join("schema-page.json"),
+        catalog.path().join("schema-page.json"),
+    )
+    .unwrap();
+    let mut documents: Value =
+        serde_json::from_slice(&std::fs::read(testdata.join("documents.json")).unwrap()).unwrap();
+    let pid = documents
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|document| document["body"]["vct"] == "urn:eudi:pid:1")
+        .unwrap();
+    edit(pid["body"]["claims"].as_array_mut().unwrap());
+    std::fs::write(
+        catalog.path().join("documents.json"),
+        serde_json::to_vec(&documents).unwrap(),
+    )
+    .unwrap();
+    let mut config = fixture_config();
+    config.catalog.static_dir = Some(catalog.path().to_owned());
+
+    let (signer, private) = test_signer();
+    let public = siros_issuer_core::signer::Signer::public_jwk(&signer).unwrap();
+    let service = spawn_service_with_config(
+        config,
+        Arc::new(PermitPdp),
+        Arc::new(RecordingAllocator {
+            list_url: Url::parse("http://127.0.0.1:9/lists/test-list").unwrap(),
+            next_index: AtomicU64::new(0),
+            updates: Mutex::new(Vec::new()),
+        }),
+        Arc::new(signer),
+        public.clone(),
+        signer_cert_chain(&private),
+        false,
+        None,
+        siros_issuer_service::config::PreAuthorizedClientAuth::Required,
+        None,
+        None,
+        suite_client_registry(),
+    )
+    .await;
+    let service = TestService {
+        base: service.base,
+        signer: siros_issuer_core::signer::JwkSigner::new(private).unwrap(),
+    };
+    let (created, _) = create_session(
+        &service,
+        &ec_key(),
+        json!({"credential": "urn:eudi:pid:1", "subject": subject}),
+    )
+    .await;
+    let body: Value = created.json().await.unwrap();
+    let (issued, _) = wallet_redeem(&service, body["offer_uri"].as_str().unwrap()).await;
+    (issued, public)
+}
+
+/// SD-JWT VC claim paths: two nested claims with the same last segment both
+/// reach the wallet, each a member of its own parent, and neither becomes a
+/// top-level claim.
+#[tokio::test]
+async fn nested_claims_reach_the_wallet_at_their_own_path() {
+    let (issued, public) = issue_pid_with_claims(
+        |claims| {
+            claims.extend([
+                json!({"path": ["home", "country"]}),
+                json!({"path": ["work", "country"]}),
+            ])
+        },
+        json!({
+            "given_name": "Anna", "family_name": "Andersson",
+            "home": {"country": "SE"}, "work": {"country": "NO"}
+        }),
+    )
+    .await;
+    let verified = verify_sdjwt(
+        &issued,
+        &StaticKey(public),
+        &VerifyParams::new(now_unix(), HolderBinding::NotRequired),
+    )
+    .expect("verifier-core verifies the credential");
+    assert_eq!(verified.claims["home"], json!({"country": "SE"}));
+    assert_eq!(verified.claims["work"], json!({"country": "NO"}));
+    assert!(verified.claims.get("country").is_none());
 }
 
 /// The knob's semantics (issue #21): default TRUE — encryption is used

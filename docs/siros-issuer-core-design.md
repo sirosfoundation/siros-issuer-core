@@ -689,6 +689,9 @@ Claims mapping: subject_data → claims (schema-ordered, type-checked)
 - Catalog is refreshed on a timer and on-demand per session creation; SRI verification
   (already implemented in Rust) validates schema bodies.
 - A credential absent from the catalog cannot be issued — **fail closed**.
+- A dc+sd-jwt claim path into an array (trailing `null`) issues with the array's own claim.
+  A document that names the elements but not the array itself is refused
+  (`catalog_invalid`): the claim would be silently absent until presentation.
 - Adding a credential type = adding it to the catalog. No deployment change, no code.
 
 ### 8.2 Formats v1
