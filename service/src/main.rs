@@ -4,7 +4,7 @@
 //! end (offer → token → credential → notification), and the backend
 //! session API behind client-assertion auth + PDP + status allocation.
 
-use siros_issuer_service::{api, config, fetch, pdp, status, store, vault, zk_load};
+use siros_issuer_service::{api, config, fetch, pdp, signers, status, store, vault, zk_load};
 
 use api::{AppState, RefreshStatus};
 use config::Config;
@@ -13,42 +13,6 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use url::Url;
-
-/// Build the signer provider (design §11.1). P1/P2: the in-memory JWK
-/// provider — a configured JWK file, or an ephemeral dev key. P5 adds the
-/// PKCS#11 provider (kryptering `cryptoki`) for HSM-resident keys.
-fn build_signer(
-    config: &Config,
-) -> siros_issuer_core::Result<siros_issuer_core::signer::JwkSigner> {
-    let mut jwk = match &config.signing.jwk_path {
-        Some(path) => {
-            let text = std::fs::read_to_string(path).map_err(|e| {
-                siros_issuer_core::Error::configuration(format!("reading {}: {e}", path.display()))
-            })?;
-            serde_json::from_str::<jose_rs::jwk::Jwk>(&text).map_err(|e| {
-                siros_issuer_core::Error::configuration(format!("parsing {}: {e}", path.display()))
-            })?
-        }
-        None => {
-            tracing::warn!(
-                "no signing.jwk_path configured: an ephemeral dev key signs this process's \
-                 credentials; restarts rotate the key — development only"
-            );
-            jose_rs::jwk::generate_ec("P-256")
-                .map_err(|e| siros_issuer_core::Error::configuration(format!("keygen: {e}")))?
-        }
-    };
-    if jwk.alg.is_none() {
-        jwk.alg = Some(siros_issuer_core::signer::JWS_ALG.to_owned());
-    }
-    if jwk.kid.is_none() {
-        jwk.kid = Some(
-            siros_issuer_service::auth::thumbprint(&jwk)
-                .map_err(|e| siros_issuer_core::Error::configuration(e.to_string()))?,
-        );
-    }
-    siros_issuer_core::signer::JwkSigner::new(jwk)
-}
 
 fn main() {
     let config_path = std::env::args()
@@ -100,28 +64,10 @@ async fn run(config_path: &str) -> siros_issuer_core::Result<()> {
 
     let (events_tx, _) = tokio::sync::broadcast::channel(64);
 
-    // Provider selection is configuration (design §11.1): PKCS#11 (HSM)
-    // when `[signing.pkcs11]` is present (mutually exclusive with
-    // jwk_path — validated at startup), the in-memory JWK otherwise.
-    // One `signer::Signer` either way; the issuance code cannot tell.
-    let signer_dyn: Arc<dyn siros_issuer_core::signer::Signer> = match &config.signing.pkcs11 {
-        Some(pkcs11_cfg) => Arc::new(
-            siros_issuer_service::pkcs11::Pkcs11SignerProvider::connect(pkcs11_cfg).unwrap_or_else(
-                |e| {
-                    eprintln!("siros-issuer-service: {e}");
-                    std::process::exit(1);
-                },
-            ),
-        ),
-        None => {
-            let signer: Arc<siros_issuer_core::signer::JwkSigner> =
-                Arc::new(build_signer(&config).unwrap_or_else(|e| {
-                    eprintln!("siros-issuer-service: {e}");
-                    std::process::exit(1);
-                }));
-            signer
-        }
-    };
+    // Provider selection is configuration (design §11.1), one rule for
+    // every signing surface; the issuance code cannot tell providers apart.
+    let signers = signers::from_config(&config.signing)?;
+    let signer_dyn = signers.credential;
     let request_encryption_jwk: Option<serde_json::Value> =
         match &config.signing.request_encryption_jwk_path {
             Some(path) => {
@@ -381,7 +327,8 @@ async fn run(config_path: &str) -> siros_issuer_core::Result<()> {
         endpoint_paths,
         deferred_interval_seconds: config.issuance.deferred_interval_seconds,
         request_encryption_key,
-        cert_chain_der: load_cert_chain(&config),
+        cert_chain_der: signers.credential_chain,
+        metadata_signer: signers.metadata,
         attestation: attestation_policy.clone(),
         wallet_attestation,
         signer: signer_dyn.clone(),
@@ -512,36 +459,4 @@ fn mark_refresh_ok(refresh: &RefreshStatus) {
         .last_error
         .write()
         .expect("refresh status lock poisoned") = None;
-}
-
-/// Load the issuer's certificate chain (DER, leaf first) for the mdoc
-/// x5chain. Empty when no chain is configured (dev ephemeral key).
-fn load_cert_chain(config: &Config) -> Vec<Vec<u8>> {
-    let Some(path) = &config.signing.cert_chain_path else {
-        return Vec::new();
-    };
-    let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
-        eprintln!("siros-issuer-service: reading cert chain {path:?}: {e}");
-        std::process::exit(1);
-    });
-    let mut chain = Vec::new();
-    for block in text.split("-----END CERTIFICATE-----") {
-        let Some(b64) = block
-            .split_once("-----BEGIN CERTIFICATE-----")
-            .map(|(_, rest)| rest)
-        else {
-            continue;
-        };
-        let cleaned: String = b64.chars().filter(|c| !c.is_whitespace()).collect();
-        let der = siros_issuer_core::sdjwt_issue::b64_decode_std(&cleaned).unwrap_or_else(|e| {
-            eprintln!("siros-issuer-service: parsing cert chain {path:?}: {e}");
-            std::process::exit(1);
-        });
-        chain.push(der);
-    }
-    if chain.is_empty() {
-        eprintln!("siros-issuer-service: cert chain {path:?} contains no certificates");
-        std::process::exit(1);
-    }
-    chain
 }

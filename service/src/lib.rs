@@ -15,6 +15,7 @@ pub mod mongo_store;
 pub mod pdp;
 pub mod pkcs11;
 pub mod rate_limit;
+pub mod signers;
 pub mod status;
 pub mod store;
 pub mod telemetry;

@@ -7,12 +7,16 @@
 //! (`softhsm2-util --import`). Skips when softhsm2-util is absent
 //! (the module is optional).
 
-use std::path::PathBuf;
+// Each test binary that includes this file uses part of it.
+#![allow(dead_code)]
+
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use siros_issuer_core::signer::Signer;
 use siros_issuer_service::pkcs11::{Pkcs11Cfg, Pkcs11SignerProvider};
 
+pub const MODULE: &str = "/usr/lib/softhsm/libsofthsm2.so";
 pub const LABEL: &str = "issuer-signing-hsm";
 pub const PIN: &str = "issuer-test-pin-4321";
 pub const KID: &str = "issuer-signing-hsm-1";
@@ -31,7 +35,6 @@ pub struct SoftHsmToken {
     pub public: p256::ecdsa::VerifyingKey,
     /// A self-signed certificate over the same key (the mdoc x5chain —
     /// read by the issuance e2e; unused by the contract test).
-    #[allow(dead_code)]
     pub cert_der: Vec<u8>,
 }
 
@@ -61,64 +64,93 @@ pub fn provision() -> Option<SoftHsmToken> {
     )
     .ok()?;
 
-    // The key: software-generated P-256 (the issuer's algorithm).
-    let secret = p256::ecdsa::SigningKey::random(&mut p256::ecdsa::signature::rand_core::OsRng);
-    let key_pem_text = secret.to_pkcs8_pem(p256::pkcs8::LineEnding::LF).ok()?;
-    let key_pem = dir.join("signing-key.pem");
-    std::fs::write(&key_pem, &key_pem_text).ok()?;
+    if !softhsm(
+        &dir,
+        &[
+            "--init-token",
+            "--free",
+            "--label",
+            "issuer-test",
+            "--so-pin",
+            "issuer-test-so-pin",
+            "--pin",
+            PIN,
+        ],
+    ) {
+        return None;
+    }
+    let secret = import_key(&dir, LABEL, "01")?;
+    Some(SoftHsmToken {
+        conf_dir: dir,
+        public: *secret.verifying_key(),
+        cert_der: self_signed(&secret)?,
+    })
+}
+
+/// A self-signed certificate (DER) over `secret`.
+pub fn self_signed(secret: &p256::ecdsa::SigningKey) -> Option<Vec<u8>> {
     use p256::pkcs8::EncodePrivateKey as _;
     let pkcs8_der = secret.to_pkcs8_der().ok()?;
-
-    // A self-signed certificate over the same key (the mdoc x5chain).
     let kp = rcgen::KeyPair::from_pkcs8_der_and_sign_algo(
         &rustls_pki_types::PrivatePkcs8KeyDer::from(pkcs8_der.as_bytes()),
         &rcgen::PKCS_ECDSA_P256_SHA256,
     )
     .ok()?;
     let params = rcgen::CertificateParams::new(vec!["issuer.example.org".to_string()]).ok()?;
-    let cert = params.self_signed(&kp).ok()?;
+    Some(params.self_signed(&kp).ok()?.der().to_vec())
+}
 
-    // Import the private key into a fresh token.
-    let run = |args: &[&str]| {
-        Command::new("softhsm2-util")
-            .env("SOFTHSM2_CONF", &conf)
-            .args(args)
-            .output()
-            .map(|out| out.status.success())
-            .unwrap_or(false)
-    };
-    if !run(&[
-        "--init-token",
-        "--free",
-        "--label",
-        "issuer-test",
-        "--so-pin",
-        "issuer-test-so-pin",
-        "--pin",
-        PIN,
-    ]) {
-        return None;
-    }
-    if !run(&[
-        "--import",
-        key_pem.to_str()?,
-        "--token",
-        "issuer-test",
-        "--label",
-        LABEL,
-        "--id",
-        "01",
-        "--pin",
-        PIN,
-    ]) {
-        return None;
-    }
+/// Write a PEM certificate chain.
+pub fn write_chain(path: &Path, chain: &[&[u8]]) {
+    use base64::Engine as _;
+    let pem: String = chain
+        .iter()
+        .map(|der| {
+            format!(
+                "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+                base64::engine::general_purpose::STANDARD.encode(der)
+            )
+        })
+        .collect();
+    std::fs::write(path, pem).expect("writes the chain");
+}
 
-    Some(SoftHsmToken {
-        conf_dir: dir,
-        public: *secret.verifying_key(),
-        cert_der: cert.der().to_vec(),
-    })
+fn softhsm(dir: &Path, args: &[&str]) -> bool {
+    Command::new("softhsm2-util")
+        .env("SOFTHSM2_CONF", dir.join("softhsm2.conf"))
+        .args(args)
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+
+/// Generate a software P-256 key (the issuer's algorithm) and import it
+/// into the token under `label`.
+pub fn import_key(dir: &Path, label: &str, id: &str) -> Option<p256::ecdsa::SigningKey> {
+    use p256::pkcs8::EncodePrivateKey as _;
+    let secret = p256::ecdsa::SigningKey::random(&mut p256::ecdsa::signature::rand_core::OsRng);
+    let key_pem = dir.join(format!("{label}.pem"));
+    std::fs::write(
+        &key_pem,
+        secret.to_pkcs8_pem(p256::pkcs8::LineEnding::LF).ok()?,
+    )
+    .ok()?;
+    softhsm(
+        dir,
+        &[
+            "--import",
+            key_pem.to_str()?,
+            "--token",
+            "issuer-test",
+            "--label",
+            label,
+            "--id",
+            id,
+            "--pin",
+            PIN,
+        ],
+    )
+    .then_some(secret)
 }
 
 /// Connect the provider against a provisioned token.
@@ -126,7 +158,7 @@ pub fn provider(token: &SoftHsmToken) -> Pkcs11SignerProvider {
     // SoftHSM locates its token store via SOFTHSM2_CONF.
     std::env::set_var("SOFTHSM2_CONF", token.conf_dir.join("softhsm2.conf"));
     Pkcs11SignerProvider::connect(&Pkcs11Cfg {
-        module_path: "/usr/lib/softhsm/libsofthsm2.so".to_owned(),
+        module_path: MODULE.to_owned(),
         slot_id: None,
         pin: Some(PIN.to_owned()),
         key_label: LABEL.to_owned(),

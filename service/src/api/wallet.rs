@@ -175,12 +175,16 @@ pub async fn credential_issuer_metadata(
                 .any(|media| media.starts_with("application/jwt"))
         });
     if wants_jwt {
+        let (signer, x5c) = match &state.metadata_signer {
+            Some((signer, chain)) => (signer.as_ref(), chain.as_slice()),
+            None => (state.signer.as_ref(), state.cert_chain_der.as_slice()),
+        };
         let jws = match siros_issuer_core::oid4vci::signed_metadata_jws(
             &metadata,
             crate::status::now_unix(),
             3600,
-            state.signer.as_ref(),
-            &state.cert_chain_der,
+            signer,
+            x5c,
         ) {
             Ok(jws) => jws,
             Err(error) => return err(error),

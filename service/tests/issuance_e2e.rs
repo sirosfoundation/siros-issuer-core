@@ -432,12 +432,14 @@ async fn spawn_service_full(
         refresh_token,
         wallet_attestation,
         clients,
+        None,
     )
     .await
 }
 
 /// [`spawn_service_full`] over a configuration of the test's own (another
-/// catalog directory).
+/// catalog directory) and an optional separate signer for the signed
+/// issuer metadata.
 #[allow(clippy::too_many_arguments)]
 async fn spawn_service_with_config(
     config: Config,
@@ -454,6 +456,7 @@ async fn spawn_service_with_config(
         Arc<siros_issuer_service::wallet_attestation::WalletAttestationEvaluator>,
     >,
     clients: siros_issuer_service::client_auth::ClientRegistry,
+    metadata_signer: Option<siros_issuer_service::api::MetadataSigner>,
 ) -> SignerAgnosticService {
     // Any port: issuer_base is what signed URLs carry; bind 0 and use it.
     let issuer_base = Url::parse("http://127.0.0.1:8080").unwrap();
@@ -504,6 +507,7 @@ async fn spawn_service_with_config(
         zk_seeds: Default::default(),
         request_encryption_key: None,
         cert_chain_der: cert_chain_der.clone(),
+        metadata_signer,
         attestation: Arc::new(siros_issuer_service::client_auth::WildcardRulesPolicy::new(
             Vec::new(),
         )),
@@ -3421,6 +3425,118 @@ async fn signed_metadata_without_a_chain_has_no_x5c() {
     assert!(header["jwk"]["x"].is_string(), "the jwk still rides");
 }
 
+/// A separate metadata signer (Final §12.2.2 leaves the signer to the trust
+/// framework) signs the metadata and only the metadata: the JWS carries its
+/// key and its chain and verifies under it, while the issuer's published
+/// key, the one credentials are signed with, stays the attestation key.
+#[tokio::test]
+async fn a_separate_metadata_signer_signs_only_the_metadata() {
+    let (signer, private) = test_signer();
+    let public = siros_issuer_core::signer::Signer::public_jwk(&signer).expect("public jwk");
+    let (metadata_signer, metadata_private) = test_signer();
+    let metadata_chain = signer_cert_chain(&metadata_private);
+    let svc = spawn_service_with_config(
+        fixture_config(),
+        Arc::new(PermitPdp),
+        x_allocator(),
+        Arc::new(signer),
+        public.clone(),
+        signer_cert_chain(&private),
+        false,
+        None,
+        siros_issuer_service::config::PreAuthorizedClientAuth::Required,
+        None,
+        None,
+        suite_client_registry(),
+        Some((Arc::new(metadata_signer), metadata_chain.clone())),
+    )
+    .await;
+
+    let jws = jjs_text(
+        reqwest::Client::new()
+            .get(format!("{}/.well-known/openid-credential-issuer", svc.base))
+            .header("Accept", "application/jwt")
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    jose_rs::jws::compact::verify_with_jwk(&metadata_private.to_public_jwk(), &jws)
+        .expect("the metadata verifies under the metadata key");
+    let header = signed_metadata_header(&svc.base).await;
+    assert_eq!(header["jwk"]["x"], json!(metadata_private.x));
+    assert_eq!(
+        header["x5c"],
+        json!([base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            &metadata_chain[0]
+        )])
+    );
+
+    let service = TestService {
+        base: svc.base,
+        signer: siros_issuer_core::signer::JwkSigner::new(private).expect("signer"),
+    };
+    let (created, _) = create_session(
+        &service,
+        &ec_key(),
+        json!({
+            "credential": "urn:eudi:pid:1",
+            "subject": {"given_name": "Anna", "family_name": "Andersson"}
+        }),
+    )
+    .await;
+    let body: Value = created.json().await.unwrap();
+    let (issued, _) = wallet_redeem(&service, body["offer_uri"].as_str().unwrap()).await;
+    verify_sdjwt(
+        &issued,
+        &StaticKey(public),
+        &VerifyParams::new(now_unix(), HolderBinding::NotRequired),
+    )
+    .expect("the credential verifies under the attestation key");
+}
+
+/// The metadata key and its chain are one setting: either alone, or a path
+/// that does not exist, is a startup refusal, never a fallback to the
+/// attestation key. Neither set is valid (the default).
+#[test]
+fn the_metadata_key_and_chain_are_set_together() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = |name: &str| {
+        let path = directory.path().join(name);
+        std::fs::write(&path, "").unwrap();
+        path.display().to_string()
+    };
+    let (key, chain) = (file("metadata.jwk"), file("metadata.pem"));
+    let validate = |lines: String| {
+        siros_issuer_service::config::Config::from_toml_str(&format!(
+            "[issuer]\nurl = \"https://i.example.org\"\n[catalog]\nstatic_dir = \".\"\n[signing]\n{lines}"
+        ))
+    };
+    let key_line = format!("metadata_jwk_path = \"{key}\"\n");
+    let chain_line = format!("metadata_cert_chain_path = \"{chain}\"\n");
+    validate(String::new()).expect("neither set");
+    validate(format!("{key_line}{chain_line}")).expect("both set");
+    // Design §11.1: the metadata key has the credential key's provider
+    // selection, an HSM key included, under the same refusals.
+    let hsm = |label: &str| {
+        format!(
+            "[signing.metadata_pkcs11]\nmodule_path = \"/hsm.so\"\nkey_label = \"{label}\"\nkid = \"m\"\n"
+        )
+    };
+    validate(format!("{chain_line}{}", hsm("metadata"))).expect("an HSM key and its chain");
+    for refused in [
+        key_line.clone(),
+        chain_line.clone(),
+        hsm("metadata"),
+        format!("{key_line}{chain_line}{}", hsm("metadata")),
+        format!("{chain_line}{}", hsm("")),
+        format!("{key_line}metadata_cert_chain_path = \"{chain}.absent\"\n"),
+    ] {
+        assert_eq!(validate(refused).unwrap_err().code, "configuration");
+    }
+}
+
 /// Read a text body (named to avoid the `json` shadow above).
 async fn jjs_text(response: reqwest::Response) -> String {
     response.text().await.expect("jws text")
@@ -5617,6 +5733,7 @@ async fn issue_pid_with_claims(
         None,
         None,
         suite_client_registry(),
+        None,
     )
     .await;
     let service = TestService {
