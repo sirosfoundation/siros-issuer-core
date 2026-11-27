@@ -15,6 +15,7 @@ pub fn build_catalog(documents: Vec<RegistryDocument>) -> Result<Catalog> {
     let catalog = Catalog::from_documents(documents).map_err(Error::from)?;
     for credential in &catalog.credentials {
         array_claims_declared(credential)?;
+        never_disclosable(credential)?;
     }
     Ok(catalog)
 }
@@ -37,6 +38,59 @@ fn array_claims_declared(credential: &CredentialType) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The `sd` of every all-name claim path of a dc+sd-jwt credential's type
+/// metadata (SD-JWT VC, claim selective disclosure metadata): `true` =
+/// `never`. Absent `sd` is the specification's default `allowed`. A path
+/// listed twice is `never` only if both entries are. Any other value is
+/// refused: the catalog is fail-closed, and a misspelt `never` must not
+/// silently issue something else.
+fn never_disclosable(
+    credential: &CredentialType,
+) -> Result<std::collections::BTreeMap<Vec<String>, bool>> {
+    use serde_json::Value;
+
+    let mut never = std::collections::BTreeMap::new();
+    if credential.format != crate::oid4vci::SD_JWT_FORMAT {
+        return Ok(never);
+    }
+    for claim in credential
+        .raw
+        .get("claims")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let is_never = match claim.get("sd").map(Value::as_str) {
+            None | Some(Some("allowed" | "always")) => false,
+            Some(Some("never")) => true,
+            Some(_) => {
+                return Err(Error::new(
+                    code::CATALOG_INVALID,
+                    format!(
+                        "{}: claim sd must be always, allowed or never",
+                        credential.identifier
+                    ),
+                ))
+            }
+        };
+        // A path into an array (null segment) addresses no claim of
+        // its own here: it issues as part of the array.
+        let path: Option<Vec<String>> = claim
+            .get("path")
+            .and_then(Value::as_array)
+            .filter(|path| !path.is_empty())
+            .and_then(|path| {
+                path.iter()
+                    .map(|segment| segment.as_str().map(str::to_owned))
+                    .collect()
+            });
+        if let Some(path) = path {
+            *never.entry(path).or_insert(true) &= is_never;
+        }
+    }
+    Ok(never)
 }
 
 /// The dc+sd-jwt credential claims of a subject: every catalog claim the
@@ -86,6 +140,47 @@ pub fn credential_claims(
         target.insert((*last).to_owned(), value.clone());
     }
     claims
+}
+
+/// The paths of `claims` (from [`credential_claims`]) to conceal: every
+/// top-level claim, whole, unless the type metadata declares it
+/// `sd: "never"`. A `never` object rides in the clear, and only its
+/// members that are declared without `never` are concealed, one by one.
+/// An object the metadata names only through its members is in the clear
+/// as soon as one of them is `never`: concealing it would conceal that
+/// member too.
+pub fn concealed_claims(
+    credential: &CredentialType,
+    claims: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Vec<Vec<String>>> {
+    let never = never_disclosable(credential)?;
+    let mut concealed = Vec::new();
+    for name in claims.keys() {
+        let own = std::slice::from_ref(name);
+        let members = never
+            .iter()
+            .filter(|(path, _)| path.len() > 1 && path[0] == *name);
+        let in_the_clear = match never.get(own) {
+            Some(never) => *never,
+            None => members.clone().any(|(_, never)| *never),
+        };
+        if !in_the_clear {
+            concealed.push(own.to_vec());
+            continue;
+        }
+        concealed.extend(
+            members
+                .filter(|(path, never)| {
+                    !**never
+                        && path[1..]
+                            .iter()
+                            .try_fold(&claims[name], |value, segment| value.get(segment))
+                            .is_some()
+                })
+                .map(|(path, _)| path.clone()),
+        );
+    }
+    Ok(concealed)
 }
 
 /// Resolve a credential by any of its identifiers: vct (dc+sd-jwt), doctype

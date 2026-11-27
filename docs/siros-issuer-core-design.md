@@ -697,7 +697,8 @@ Claims mapping: subject_data → claims (schema-ordered, type-checked)
 ### 8.2 Formats v1
 
 **dc+sd-jwt (SD-JWT VC).** Issuance: claim flattening/structuring per VCTM, selective
-disclosure digest list (SHA-256, reusing verifier-core's disclosure logic in reverse),
+disclosure digest list (SHA-256, reusing verifier-core's disclosure logic in reverse;
+every subject claim except those the type metadata declares `sd: "never"`),
 `kb` constraints, `status` block referencing the siros-status-service list URL + index.
 ~1–2k LOC.
 
